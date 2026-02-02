@@ -34,3 +34,9 @@ source venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
+
+### 3. Running the TeeTime Server
+From the root of the `fastapi-backend/` directory, run:
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
