@@ -1,10 +1,34 @@
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
-
-// Import and start the server
-const server = require('./server');
+const { spawn } = require('child_process');
 
 let mainWindow;
+let pythonProcess = null;
+
+function startFastAPIServer() {
+    // Start the FastAPI backend
+    const pythonPath = process.platform === 'win32' ? 'python' : 'python3';
+    
+    pythonProcess = spawn(pythonPath, ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', '8000'], {
+        cwd: __dirname,
+        stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    pythonProcess.stdout.on('data', (data) => {
+        console.log(`FastAPI: ${data}`);
+    });
+
+    pythonProcess.stderr.on('data', (data) => {
+        console.log(`FastAPI: ${data}`);
+    });
+
+    pythonProcess.on('error', (err) => {
+        console.error('Failed to start FastAPI server:', err);
+    });
+
+    // Give the server a moment to start
+    return new Promise((resolve) => setTimeout(resolve, 2000));
+}
 
 function createWindow() {
     mainWindow = new BrowserWindow({
@@ -23,11 +47,8 @@ function createWindow() {
         show: false // Don't show until ready
     });
 
-    // Wait for server to be ready, then load the app
-    const serverPort = process.env.PORT || 3000;
-    
-    // Load the app from the local server
-    mainWindow.loadURL(`http://localhost:${serverPort}`);
+    // Load the static HTML file directly
+    mainWindow.loadFile(path.join(__dirname, 'public', 'index.html'));
 
     // Show window when ready to prevent visual flash
     mainWindow.once('ready-to-show', () => {
@@ -45,7 +66,10 @@ function createWindow() {
 }
 
 // This method will be called when Electron has finished initialization
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+    // Start FastAPI backend first
+    await startFastAPIServer();
+    
     createWindow();
 
     app.on('activate', () => {
@@ -63,7 +87,17 @@ app.on('window-all-closed', () => {
     }
 });
 
-// Handle app quit
+// Handle app quit - cleanup Python process
 app.on('before-quit', () => {
-    // Cleanup if needed
+    if (pythonProcess) {
+        pythonProcess.kill();
+        pythonProcess = null;
+    }
+});
+
+app.on('quit', () => {
+    if (pythonProcess) {
+        pythonProcess.kill();
+        pythonProcess = null;
+    }
 });
