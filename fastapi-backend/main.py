@@ -4,9 +4,10 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
 from datetime import datetime
+from typing import List
 
 # --- Database Setup ---
-SQLALCHEMY_DATABASE_URL = "sqlite:///./teatime_backend.db"
+SQLALCHEMY_DATABASE_URL = "sqlite:///./teetime_backend.db"
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -14,20 +15,36 @@ Base = declarative_base()
 class User(Base):
     __tablename__ = "users"
     username = Column(String, primary_key=True, index=True)
-    public_key = Column(String, nullable=False) # Hex encoded public key
+    public_key = Column(String, nullable=False)
 
 class Message(Base):
     __tablename__ = "messages"
     id = Column(Integer, primary_key=True, index=True)
     sender = Column(String, ForeignKey("users.username"))
     receiver = Column(String, ForeignKey("users.username"))
-    encrypted_content = Column(String, nullable=False) # The blob from the client
+    encrypted_content = Column(String, nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
     is_delivered = Column(Boolean, default=False)
 
 Base.metadata.create_all(bind=engine)
 
-# --- Pydantic Schemas (Data Validation) ---
+# --- Pydantic Schemas ---
+class UserResponse(BaseModel):
+    username: str
+    public_key: str
+    class Config:
+        from_attributes = True
+
+class MessageResponse(BaseModel):
+    id: int
+    sender: str
+    receiver: str
+    encrypted_content: str
+    timestamp: datetime
+    is_delivered: bool
+    class Config:
+        from_attributes = True
+
 class UserCreate(BaseModel):
     username: str
     public_key: str
@@ -37,9 +54,8 @@ class MessageSend(BaseModel):
     receiver: str
     encrypted_content: str
 
-app = FastAPI(title="E2E TeaTime Backend")
+app = FastAPI(title="TeeTime E2EE Backend")
 
-# Dependency
 def get_db():
     db = SessionLocal()
     try:
@@ -47,11 +63,10 @@ def get_db():
     finally:
         db.close()
 
-# --- API Endpoints ---
+# --- Existing Endpoints ---
 
-@app.post("/register")
+@app.post("/register", tags=["User Actions"])
 def register(user: UserCreate, db: Session = Depends(get_db)):
-    """Users register their Public Key here."""
     db_user = db.query(User).filter(User.username == user.username).first()
     if db_user:
         db_user.public_key = user.public_key
@@ -61,42 +76,21 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
     db.commit()
     return {"status": "success"}
 
-@app.get("/get-public-key/{username}")
-def get_key(username: str, db: Session = Depends(get_db)):
-    """Clients call this to get the key needed to encrypt a message for 'username'."""
-    user = db.query(User).filter(User.username == username).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return {"username": username, "public_key": user.public_key}
-
-@app.post("/send-message")
+@app.post("/send-message", tags=["Message Actions"])
 def send_message(msg: MessageSend, db: Session = Depends(get_db)):
-    """Receives an already encrypted blob and stores it for the receiver."""
-    # Verify both users exist
-    receiver = db.query(User).filter(User.username == msg.receiver).first()
-    if not receiver:
-        raise HTTPException(status_code=404, detail="Receiver not found")
-    
-    new_msg = Message(
-        sender=msg.sender,
-        receiver=msg.receiver,
-        encrypted_content=msg.encrypted_content
-    )
+    new_msg = Message(sender=msg.sender, receiver=msg.receiver, encrypted_content=msg.encrypted_content)
     db.add(new_msg)
     db.commit()
-    return {"status": "Message queued for delivery"}
+    return {"status": "Message queued"}
 
-@app.get("/fetch-messages/{username}")
-def fetch_messages(username: str, db: Session = Depends(get_db)):
-    """Receiver calls this to get their new encrypted messages."""
-    messages = db.query(Message).filter(
-        Message.receiver == username, 
-        Message.is_delivered == False
-    ).all()
-    
-    # Mark as delivered (WhatsApp style)
-    for m in messages:
-        m.is_delivered = True
-    db.commit()
-    
-    return messages
+# --- New "Admin View" Endpoints for Swagger ---
+
+@app.get("/users", response_model=List[UserResponse], tags=["Admin View"])
+def get_all_users(db: Session = Depends(get_db)):
+    """Retrieve the full list of registered TeeTime users and their public keys."""
+    return db.query(User).all()
+
+@app.get("/all-messages", response_model=List[MessageResponse], tags=["Admin View"])
+def get_all_messages(db: Session = Depends(get_db)):
+    """Retrieve every message stored in the database (Admin Debug Mode)."""
+    return db.query(Message).all()
