@@ -1,1 +1,3 @@
 messaging-app/database.json
+messaging-app/node_modules/
+messaging-app/dist/

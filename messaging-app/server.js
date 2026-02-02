@@ -126,7 +126,18 @@ app.get('/api/users', (req, res) => {
     res.json(db.users);
 });
 
-const PORT = 3000;
-server.listen(PORT, () => {
-    console.log(`Server running at http://localhost:${PORT}`);
-});
+const PORT = process.env.PORT || 3000;
+
+// Only start server if not being required as a module (for Electron)
+if (require.main === module) {
+    server.listen(PORT, () => {
+        console.log(`Server running at http://localhost:${PORT}`);
+    });
+} else {
+    // Started by Electron - start server and export
+    server.listen(PORT, () => {
+        console.log(`TeaTime server running at http://localhost:${PORT}`);
+    });
+}
+
+module.exports = server;
