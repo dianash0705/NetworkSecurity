@@ -3,3 +3,4 @@ messaging-app/node_modules/
 messaging-app/dist/
 fastapi-backend/venv/
 **/*.db
+__pycache__/

@@ -4,6 +4,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
 from datetime import datetime
+from typing import List
 
 # --- Database Setup ---
 SQLALCHEMY_DATABASE_URL = "sqlite:///./teatime_backend.db"
@@ -14,14 +15,14 @@ Base = declarative_base()
 class User(Base):
     __tablename__ = "users"
     username = Column(String, primary_key=True, index=True)
-    public_key = Column(String, nullable=False) # Hex encoded public key
+    public_key = Column(String, nullable=False)
 
 class Message(Base):
     __tablename__ = "messages"
     id = Column(Integer, primary_key=True, index=True)
     sender = Column(String, ForeignKey("users.username"))
     receiver = Column(String, ForeignKey("users.username"))
-    encrypted_content = Column(String, nullable=False) # The blob from the client
+    encrypted_content = Column(String, nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
     is_delivered = Column(Boolean, default=False)
 
@@ -37,6 +38,23 @@ class MessageSend(BaseModel):
     receiver: str
     encrypted_content: str
 
+# New Schemas for Admin Views
+class UserOut(BaseModel):
+    username: str
+    public_key: str
+    class Config:
+        from_attributes = True
+
+class MessageOut(BaseModel):
+    id: int
+    sender: str
+    receiver: str
+    encrypted_content: str
+    timestamp: datetime
+    is_delivered: bool
+    class Config:
+        from_attributes = True
+
 app = FastAPI(title="E2E TeaTime Backend")
 
 # Dependency
@@ -47,9 +65,9 @@ def get_db():
     finally:
         db.close()
 
-# --- API Endpoints ---
+# --- User API Endpoints ---
 
-@app.post("/register")
+@app.post("/register", tags=["User Actions"])
 def register(user: UserCreate, db: Session = Depends(get_db)):
     """Users register their Public Key here."""
     db_user = db.query(User).filter(User.username == user.username).first()
@@ -61,7 +79,7 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
     db.commit()
     return {"status": "success"}
 
-@app.get("/get-public-key/{username}")
+@app.get("/get-public-key/{username}", tags=["User Actions"])
 def get_key(username: str, db: Session = Depends(get_db)):
     """Clients call this to get the key needed to encrypt a message for 'username'."""
     user = db.query(User).filter(User.username == username).first()
@@ -69,10 +87,9 @@ def get_key(username: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="User not found")
     return {"username": username, "public_key": user.public_key}
 
-@app.post("/send-message")
+@app.post("/send-message", tags=["User Actions"])
 def send_message(msg: MessageSend, db: Session = Depends(get_db)):
     """Receives an already encrypted blob and stores it for the receiver."""
-    # Verify both users exist
     receiver = db.query(User).filter(User.username == msg.receiver).first()
     if not receiver:
         raise HTTPException(status_code=404, detail="Receiver not found")
@@ -86,7 +103,7 @@ def send_message(msg: MessageSend, db: Session = Depends(get_db)):
     db.commit()
     return {"status": "Message queued for delivery"}
 
-@app.get("/fetch-messages/{username}")
+@app.get("/fetch-messages/{username}", tags=["User Actions"])
 def fetch_messages(username: str, db: Session = Depends(get_db)):
     """Receiver calls this to get their new encrypted messages."""
     messages = db.query(Message).filter(
@@ -94,9 +111,20 @@ def fetch_messages(username: str, db: Session = Depends(get_db)):
         Message.is_delivered == False
     ).all()
     
-    # Mark as delivered (WhatsApp style)
     for m in messages:
         m.is_delivered = True
     db.commit()
     
     return messages
+
+# --- Admin API Endpoints (New) ---
+
+@app.get("/admin/users", response_model=List[UserOut], tags=["Admin View"])
+def list_all_users(db: Session = Depends(get_db)):
+    """See all registered users and their public keys."""
+    return db.query(User).all()
+
+@app.get("/admin/messages", response_model=List[MessageOut], tags=["Admin View"])
+def list_all_messages(db: Session = Depends(get_db)):
+    """See every message in the database, regardless of delivery status."""
+    return db.query(Message).all()
