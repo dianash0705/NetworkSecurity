@@ -6,7 +6,6 @@ import xeddsa.bindings
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from pydantic import BaseModel
 
 CURVE = X25519PrivateKey
 HASH = hashes.SHA256
@@ -29,106 +28,90 @@ def kdf(secret_key_material: bytes) -> bytes:
     ).derive(key_material)
 
 
-class CreateIdentityRequest(BaseModel):
-    pass
+@dataclass(frozen=True)
+class IdentityKeyPair:
+    identity_key_private: X25519PrivateKey
+    identity_key_public: X25519PublicKey
 
 
-class Identity(BaseModel):
-    identity_key_private_b64: str
-    identity_key_public_b64: str
-    prekey_private_b64: str
-    prekey_public_b64: str
-    prekey_signature: str
+@dataclass(frozen=True)
+class PreKeyPair:
+    prekey_private: X25519PrivateKey
+    prekey_public: X25519PublicKey
+    prekey_signature: bytes
 
 
-class CreateIdentityResponse(BaseModel):
-    identity: Identity
-
-
-def create_identity(create_identity_request: CreateIdentityRequest) -> CreateIdentityResponse:
+def create_identity_key() -> IdentityKeyPair:
     identity_key_private = CURVE.generate()
     identity_key_public = identity_key_private.public_key()
 
+    identity_key = IdentityKeyPair(
+        identity_key_private=identity_key_private,
+        identity_key_public=identity_key_public,
+    )
+
+    return identity_key
+
+
+def create_new_prekey(identity_key: IdentityKeyPair) -> PreKeyPair:
     prekey_private = CURVE.generate()
     prekey_public = prekey_private.public_key()
 
-    prekey_signature = xeddsa.bindings.ed25519_priv_sign(priv=identity_key_private.private_bytes_raw(),
+    prekey_signature = xeddsa.bindings.ed25519_priv_sign(priv=identity_key.identity_key_private.private_bytes_raw(),
                                                          msg=prekey_public.public_bytes_raw())
 
-    return CreateIdentityResponse(identity=Identity(
-        identity_key_private_b64=base64.b64encode(identity_key_private.private_bytes_raw()).decode(),
-        identity_key_public_b64=base64.b64encode(identity_key_public.public_bytes_raw()).decode(),
-        prekey_private_b64=base64.b64encode(prekey_private.private_bytes_raw()).decode(),
-        prekey_public_b64=base64.b64encode(prekey_public.public_bytes_raw()).decode(),
-        prekey_signature=base64.b64encode(prekey_signature).decode()
-    ))
+    prekey = PreKeyPair(
+        prekey_private=prekey_private,
+        prekey_public=prekey_public,
+        prekey_signature=prekey_signature,
+    )
+
+    return prekey
 
 
-class GenerateOneTimeKeysRequest(BaseModel):
-    count: int
+@dataclass(frozen=True)
+class OneTimeKeyPair:
+    one_time_prekey_private: X25519PrivateKey
+    one_time_prekey_public: X25519PublicKey
 
 
-class OneTimeKeyPair(BaseModel):
-    one_time_prekey_private_b64: str
-    one_time_prekey_public_b64: str
-
-
-class GenerateOneTimeKeysResponse(BaseModel):
+@dataclass(frozen=True)
+class OneTimeKeys:
     one_time_keys: list[OneTimeKeyPair]
 
 
-def generate_one_time_keys(generate_one_time_key_request: GenerateOneTimeKeysRequest) -> GenerateOneTimeKeysResponse:
+def generate_one_time_keys(number_of_keys_to_generate: int) -> OneTimeKeys:
     one_time_keys = []
 
-    for i in range(generate_one_time_key_request.count):
+    for i in range(number_of_keys_to_generate):
         private_key = CURVE.generate()
         public_key = private_key.public_key()
 
         one_time_key_pair = OneTimeKeyPair(
-            one_time_prekey_private_b64=base64.b64encode(private_key.private_bytes_raw()).decode(),
-            one_time_prekey_public_b64=base64.b64encode(public_key.public_bytes_raw()).decode(),
+            one_time_prekey_private=private_key,
+            one_time_prekey_public=public_key,
         )
 
         one_time_keys.append(one_time_key_pair)
 
-    return GenerateOneTimeKeysResponse(one_time_keys=one_time_keys)
-
-
-class PeerPreKeyBundle(BaseModel):
-    peer_identity_key_public_b64: str
-    peer_prekey_public_b64: str
-    peer_prekey_signature_b64: str
-    peer_one_time_prekey_public_b64: str
-
-
-class X3DHHandshakeRequest(BaseModel):
-    self_identity: Identity
-    peer_prekey_bundle: PeerPreKeyBundle
-
-
-class X3DHHandshakeResponse(BaseModel):
-    secret_key_b64: str
-
-
-def x3dhh_handshake(x3dh_req: X3DHHandshakeRequest) -> X3DHHandshakeResponse:
-    pass
+    return OneTimeKeys(one_time_keys=one_time_keys)
 
 
 @dataclass(frozen=True)
-class X3DHResult:
+class X3DHInitiatorResult:
     self_ephemeral_key_public: X25519PublicKey
     shared_secret_key: bytes
     associated_data: bytes
 
 
-def x3dh(
+def x3dh_by_initiator(
         self_identity_key: X25519PrivateKey,
         self_identity_key_public: X25519PublicKey,
         peer_identity_key_public: X25519PublicKey,
         peer_prekey_public: X25519PublicKey,
         peer_prekey_signature: bytes,
         peer_onetime_prekey_public: X25519PublicKey,
-) -> X3DHResult:
+) -> X3DHInitiatorResult:
     ephemeral_private_key = CURVE.generate()
     ephemeral_public_key = ephemeral_private_key.public_key()
 
@@ -151,8 +134,32 @@ def x3dh(
         "receiver_identity_key_b64": base64.b64encode(peer_identity_key_public.public_bytes_raw()).decode(),
     }).encode())
 
-    # TODO: aead the data first
+    return X3DHInitiatorResult(
+        self_ephemeral_key_public=ephemeral_public_key,
+        shared_secret_key=secret_key,
+        associated_data=associated_data,
+    )
 
-    return X3DHResult(
 
+@dataclass(frozen=True)
+class X3DHReceiverResult:
+    shared_secret_key: bytes
+
+
+def x3dh_by_receiver(
+        self_identity_key_private: X25519PrivateKey,
+        self_prekey_private: X25519PrivateKey,
+        self_onetime_key_private: X25519PrivateKey,
+        peer_identity_key_public: X25519PublicKey,
+        peer_ephemeral_key_public: X25519PublicKey,
+):
+    dh1 = self_prekey_private.exchange(peer_identity_key_public)
+    dh2 = self_identity_key_private.exchange(peer_ephemeral_key_public)
+    dh3 = self_prekey_private.exchange(peer_ephemeral_key_public)
+    dh4 = self_onetime_key_private.exchange(peer_ephemeral_key_public)
+
+    secret_key = kdf(dh1 + dh2 + dh3 + dh4)
+
+    return X3DHReceiverResult(
+        shared_secret_key=secret_key,
     )
