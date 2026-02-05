@@ -18,7 +18,7 @@ class User(Base):
     __tablename__ = "users"
     username = Column(String, primary_key=True, index=True)
     public_key = Column(String, nullable=False)
-    identity_key_public = Column(String, nullable=True)
+    identity_key_public = Column(String, nullable=False)
     prekey_public = Column(String, nullable=True)
     prekey_signature_public = Column(String, nullable=True)
     prekey_needs_update = Column(Boolean, default=False)  # Flag to signal client to update prekeys
