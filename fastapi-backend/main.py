@@ -203,7 +203,7 @@ def register(user: UserRegister, db: Session = Depends(get_db)):
         db.add(onetime_key)
     
     db.commit()
-    return {"status": "success", "onetime_keys_public_stored": len(user.onetime_keys_public)}
+    return {"status": "success"}
 
 @app.post("/upload-onetime-keys", tags=["User Actions"])
 def upload_onetime_keys(data: OneTimeKeyUpload, db: Session = Depends(get_db)):
