@@ -5,7 +5,7 @@
 # region __External_Functions__
 # https://signal.org/docs/specifications/doubleratchet/#dr-external-functions
 
-from crypto_impl import GENERATE_DH, DH, KDF_RK, KDF_CK, ENCRYPT, DECRYPT, HEADER, CONCAT
+from double_ratchet_impl import GENERATE_DH, DH, KDF_RK, KDF_CK, ENCRYPT, DECRYPT, HEADER, CONCAT
 
 # def GENERATE_DH():
 #     raise NotImplementedError
