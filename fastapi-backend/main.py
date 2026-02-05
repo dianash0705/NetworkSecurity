@@ -146,6 +146,23 @@ def get_db():
     finally:
         db.close()
 
+# --- Helper Functions ---
+
+def get_onetime_keys_status(username: str, db: Session) -> dict:
+    """
+    Helper function to check onetime keys status for a user.
+    Returns remaining keys count and whether more keys are needed.
+    """
+    remaining_keys = db.query(OneTimeKey).filter(
+        OneTimeKey.username == username,
+        OneTimeKey.is_used == False
+    ).count()
+    
+    return {
+        "remaining_onetime_keys": remaining_keys,
+        "needs_more_keys": remaining_keys <= ONETIME_KEY_THRESHOLD
+    }
+
 # --- User API Endpoints ---
 
 @app.post("/register", tags=["User Actions"])
@@ -204,12 +221,9 @@ def upload_onetime_keys(data: OneTimeKeyUpload, db: Session = Depends(get_db)):
     
     db.commit()
     
-    available_keys = db.query(OneTimeKey).filter(
-        OneTimeKey.username == data.username,
-        OneTimeKey.is_used == False
-    ).count()
+    keys_status = get_onetime_keys_status(data.username, db)
     
-    return {"status": "success", "onetime_keys_public_added": len(data.onetime_keys_public), "total_available": available_keys}
+    return {"status": "success", "onetime_keys_public_added": len(data.onetime_keys_public), "total_available": keys_status["remaining_onetime_keys"]}
 
 @app.post("/update-prekeys", tags=["User Actions"])
 def update_prekeys(data: PrekeyUpdate, db: Session = Depends(get_db)):
@@ -266,12 +280,7 @@ def get_key_bundle(username: str, db: Session = Depends(get_db)):
         db.commit()
     
     # Check remaining onetime keys and warn if low
-    remaining_keys = db.query(OneTimeKey).filter(
-        OneTimeKey.username == username,
-        OneTimeKey.is_used == False
-    ).count()
-    
-    needs_more_keys = remaining_keys <= ONETIME_KEY_THRESHOLD
+    keys_status = get_onetime_keys_status(username, db)
     
     return {
         "username": username,
@@ -279,8 +288,48 @@ def get_key_bundle(username: str, db: Session = Depends(get_db)):
         "prekey_public": user.prekey_public,
         "prekey_signature_public": user.prekey_signature_public,
         "onetime_key_public": onetime_key_public_value,
-        "remaining_onetime_keys": remaining_keys,
-        "needs_more_keys": needs_more_keys
+        **keys_status
+    }
+
+@app.get("/get-prekey-bundle/{username}", tags=["User Actions"])
+def get_prekey_bundle(username: str, db: Session = Depends(get_db)):
+    """
+    Get the prekey bundle for a user to start a new conversation.
+    Returns:
+    - identity_key_public
+    - prekey_public
+    - prekey_signature_public
+    - onetime_key_public (deleted from server after retrieval)
+    
+    The onetime key is permanently deleted after being returned.
+    """
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Get an unused onetime key
+    onetime_key_record = db.query(OneTimeKey).filter(
+        OneTimeKey.username == username,
+        OneTimeKey.is_used == False
+    ).first()
+    
+    onetime_key_public_value = None
+    if onetime_key_record:
+        onetime_key_public_value = onetime_key_record.onetime_key_public
+        # Delete the onetime key after retrieval
+        db.delete(onetime_key_record)
+        db.commit()
+    
+    # Check remaining onetime keys and warn if low
+    keys_status = get_onetime_keys_status(username, db)
+    
+    return {
+        "username": username,
+        "identity_key_public": user.identity_key_public,
+        "prekey_public": user.prekey_public,
+        "prekey_signature_public": user.prekey_signature_public,
+        "onetime_key_public": onetime_key_public_value,
+        **keys_status
     }
 
 @app.get("/check-onetime-keys/{username}", tags=["User Actions"])
@@ -293,17 +342,11 @@ def check_onetime_keys(username: str, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    remaining_keys = db.query(OneTimeKey).filter(
-        OneTimeKey.username == username,
-        OneTimeKey.is_used == False
-    ).count()
-    
-    needs_more_keys = remaining_keys <= ONETIME_KEY_THRESHOLD
+    keys_status = get_onetime_keys_status(username, db)
     
     return {
         "username": username,
-        "remaining_onetime_keys": remaining_keys,
-        "needs_more_keys": needs_more_keys,
+        **keys_status,
         "threshold": ONETIME_KEY_THRESHOLD
     }
 
