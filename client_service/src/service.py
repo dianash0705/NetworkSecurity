@@ -6,8 +6,8 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 import signal_protocol.double_ratchet_api as double_ratchet
-from client_service.src.signal_protocol import x3dh
-from client_service.src.signal_protocol.x3dh import IdentityKeyPair
+from signal_protocol import x3dh
+from signal_protocol.x3dh import IdentityKeyPair
 
 app = FastAPI()
 
