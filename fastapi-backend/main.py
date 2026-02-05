@@ -98,7 +98,7 @@ class KeyBundleOut(BaseModel):
     identity_key_public: str
     prekey_public: str
     prekey_signature_public: str
-    onetime_key_public: str | None  # One onetime public key for the session
+    onetime_key_public: str
 
 ONETIME_KEY_THRESHOLD = 2  # When user has this many keys left, request more
 PREKEY_ROTATION_INTERVAL_WEEKS = 1  # Rotate prekeys every week
@@ -203,7 +203,7 @@ def register(user: UserRegister, db: Session = Depends(get_db)):
         db.add(onetime_key)
     
     db.commit()
-    return {"status": "success", "onetime_keys_public_stored": len(user.onetime_keys_public)}
+    return {"status": "success"}
 
 @app.post("/upload-onetime-keys", tags=["User Actions"])
 def upload_onetime_keys(data: OneTimeKeyUpload, db: Session = Depends(get_db)):
