@@ -2,6 +2,5 @@ messaging-app/database.json
 messaging-app/node_modules/
 messaging-app/dist/
 fastapi-backend/venv/
-fastapi-backend/teatime_backend.db
-*.db
+**/*.db
 __pycache__/
