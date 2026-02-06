@@ -4,3 +4,4 @@ messaging-app/dist/
 fastapi-backend/venv/
 **/*.db
 __pycache__/
+/.idea
