@@ -31,6 +31,18 @@ if ('Notification' in window && Notification.permission === 'default') {
     Notification.requestPermission();
 }
 
+// Wait for sidecar helper: resolves when `localApiPort` is set by the renderer/preload
+async function waitForLocalApi(timeoutMs = 5000) {
+    const start = Date.now();
+    while (!localApiPort) {
+        if (Date.now() - start > timeoutMs) {
+            throw new Error('Local encryption sidecar not available');
+        }
+        await new Promise(r => setTimeout(r, 100));
+    }
+    return localApiPort;
+}
+
 // Login event listeners
 loginBtn.addEventListener('click', login);
 usernameInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') login(); });
@@ -43,8 +55,8 @@ async function login() {
     status.textContent = '🔄 Connecting...';
     
     try {
-        // Initialize libsodium crypto engine
-        await window.TeaCrypto.init();
+        // Wait for the local encryption sidecar to be available
+        await waitForLocalApi();
 
         // Step 1: Check if user already exists
         const existsRes = await fetch(`${API_BASE}/user-exists/${encodeURIComponent(username)}`);
@@ -79,10 +91,30 @@ async function login() {
 
             const { encrypted_challenge } = await challengeRes.json();
 
-            // Decrypt the challenge using our private key (SealedBox)
+            // Decrypt the challenge using our private key (SealedBox) via local sidecar
             let challengeHex;
             try {
-                challengeHex = window.TeaCrypto.decryptChallenge(encrypted_challenge, storedPub, storedSec);
+                const decryptRes = await fetch(`http://127.0.0.1:${localApiPort}/sealedbox-decrypt`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        encrypted_b64: encrypted_challenge,
+                        public_key_b64: storedPub,
+                        private_key_b64: storedSec
+                    })
+                });
+
+                if (!decryptRes.ok) {
+                    const err = await decryptRes.text();
+                    console.error('SealedBox decrypt failed:', err);
+                    status.textContent = '❌ Authentication failed: could not decrypt challenge';
+                    status.classList.add('error');
+                    currentUser = null;
+                    return;
+                }
+
+                const decryptData = await decryptRes.json();
+                challengeHex = decryptData.challenge_hex;
             } catch (e) {
                 console.error('Decryption error:', e);
                 status.textContent = '❌ Authentication failed: could not decrypt challenge';
@@ -109,26 +141,99 @@ async function login() {
             console.log(`[AUTH] ${username} authenticated via challenge-response`);
 
         } else {
-            // --- New user: generate keys and register ---
+            // --- New user: generate keys via sidecar and register ---
             status.textContent = '🔑 Generating identity keys...';
 
-            const keyPair = window.TeaCrypto.generateKeyPair();
+            // Call the local sidecar service to generate X3DH identity key pair
+            let keyPair;
+            try {
+                const keyGenRes = await fetch(`http://127.0.0.1:${localApiPort}/3xdh-create-identity-key`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
 
-            // Store keys in localStorage
-            localStorage.setItem(`teatime_identity_pub_${username}`, keyPair.publicKey);
-            localStorage.setItem(`teatime_identity_sec_${username}`, keyPair.secretKey);
+                if (!keyGenRes.ok) {
+                    throw new Error('Failed to generate keys from sidecar');
+                }
 
-            // Register with the server
+                const keyGenData = await keyGenRes.json();
+                keyPair = keyGenData.x3dh_identity_key; // { identity_key_private_b64, identity_key_public_b64 }
+            } catch (e) {
+                console.error('Key generation error:', e);
+                status.textContent = '❌ Failed to generate identity keys';
+                status.classList.add('error');
+                currentUser = null;
+                return;
+            }
+
+            // Store identity keys in localStorage (private key stays local)
+            localStorage.setItem(`teatime_identity_pub_${username}`, keyPair.identity_key_public_b64);
+            localStorage.setItem(`teatime_identity_sec_${username}`, keyPair.identity_key_private_b64);
+
+            // --- Generate a signed prekey via sidecar ---
+            let prekeyData = null;
+            try {
+                const prekeyRes = await fetch(`http://127.0.0.1:${localApiPort}/x3dh-create-new-prekey`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ x3dh_identity_key: keyPair })
+                });
+
+                if (!prekeyRes.ok) throw new Error('prekey generation failed');
+                prekeyData = await prekeyRes.json();
+            } catch (e) {
+                console.error('Prekey generation error:', e);
+                status.textContent = '❌ Failed to generate prekey';
+                status.classList.add('error');
+                currentUser = null;
+                return;
+            }
+
+            // Store prekey private locally and extract public/signature for server
+            const prekeyPrivB64 = prekeyData.prekey_private_b64;
+            const prekeyPubB64 = prekeyData.prekey_public_b64;
+            const prekeySigB64 = prekeyData.prekey_signature_b64;
+            localStorage.setItem(`teatime_prekey_priv_${username}`, prekeyPrivB64);
+
+            // --- Generate one-time keys via sidecar ---
+            let onetimeKeysData = null;
+            try {
+                const otkRes = await fetch(`http://127.0.0.1:${localApiPort}/x3dh-create-onetime-keys`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ number_of_keys: 10 })
+                });
+
+                if (!otkRes.ok) throw new Error('onetime keys generation failed');
+                onetimeKeysData = await otkRes.json();
+            } catch (e) {
+                console.error('Onetime keys generation error:', e);
+                status.textContent = '❌ Failed to generate one-time keys';
+                status.classList.add('error');
+                currentUser = null;
+                return;
+            }
+
+            // Save private one-time keys locally and prepare public-only array for server
+            const onetimePrivs = [];
+            const onetimePubs = [];
+            for (const k of onetimeKeysData.onetime_keys) {
+                onetimePrivs.push(k.onetime_key_private_b64);
+                onetimePubs.push(k.onetime_key_public_b64);
+            }
+            localStorage.setItem(`teatime_onetime_privs_${username}`, JSON.stringify(onetimePrivs));
+
+            // Register with the server (send only public key material)
             const response = await fetch(`${API_BASE}/register`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     username: username,
-                    public_key: keyPair.publicKey,
-                    identity_key_public: keyPair.publicKey,
-                    prekey_public: keyPair.publicKey,
-                    prekey_signature_public: keyPair.publicKey,
-                    onetime_keys_public: [keyPair.publicKey, keyPair.publicKey]
+                    public_key: keyPair.identity_key_public_b64,
+                    identity_key_public: keyPair.identity_key_public_b64,
+                    prekey_public: prekeyPubB64,
+                    prekey_signature_public: prekeySigB64,
+                    onetime_keys_public: onetimePubs
                 })
             });
 
