@@ -296,30 +296,32 @@ async function sendMessage() {
     if (!content || !selectedContact) return;
 
     try {
-        // Step 1: Get receiver's public key (key exchange)
-        const keyResponse = await fetch(`${API_BASE}/get-public-key/${selectedContact}`);
+        // --- שינוי: שימוש בשירות ההצפנה הלוקאלי ---
         
-        if (!keyResponse.ok) {
-            const error = await keyResponse.json();
-            if (error.detail === 'User not found') {
-                alert(`User "${selectedContact}" is not registered yet. They need to join TeaTime first! 🍵`);
-                return;
-            }
-            throw new Error(error.detail);
+        // בדיקה שהשירות קיים (שה-renderer.js נטען)
+        if (!window.EncryptionService) {
+            alert("Encryption service not loaded!");
+            return;
         }
+
+        // הצפנה באמצעות ה-Python הלוקאלי
+        const encryptionResult = await window.EncryptionService.encrypt(content, selectedContact);
+
+        if (!encryptionResult) {
+            alert("Failed to encrypt message locally.");
+            return;
+        }
+
+        // השימוש בתוכן המוצפן שחזר מה-Python
+        const finalEncryptedContent = encryptionResult.encrypted_content; 
         
-        const keyData = await keyResponse.json();
-        console.log(`Key exchange: Got public key for ${selectedContact}:`, keyData.public_key);
-        
-        // Step 2: Encrypt message with receiver's public key (placeholder - using plaintext for now)
-        // In a real E2E implementation, you would encrypt here using the public key
-        const encryptedContent = content; // TODO: Implement actual encryption
-        
-        // Step 3: Send the message
+        // ------------------------------------------
+
+        // מכאן הכל נשאר אותו דבר - שליחה לשרת המרכזי
         const messageData = {
             sender: currentUser,
             receiver: selectedContact,
-            encrypted_content: encryptedContent
+            encrypted_content: finalEncryptedContent // שולחים את המוצפן, לא את הטקסט הרגיל
         };
 
         const response = await fetch(`${API_BASE}/send-message`, {
@@ -329,30 +331,26 @@ async function sendMessage() {
         });
 
         if (response.ok) {
-            // Add message to display immediately
+            // ב-UI המקומי אנחנו מציגים את הטקסט המקורי (כדי שהשולח יבין מה הוא כתב)
             const localMsg = {
                 sender: currentUser,
                 receiver: selectedContact,
-                encrypted_content: content,
+                encrypted_content: content, // ב-UI מציגים רגיל
                 timestamp: new Date().toISOString()
             };
             
             appendMessage(localMsg);
             messageInput.value = '';
             
-            // Make sure receiver is in contacts
             addUserToList(selectedContact);
         } else {
             const error = await response.json();
-            console.error('Send error:', error);
-            alert('Failed to send message: ' + (error.detail || 'Unknown error'));
+            alert('Failed to send: ' + error.detail);
         }
     } catch (error) {
         console.error('Send error:', error);
-        alert('Failed to send message. Is the server running?');
     }
 }
-
 // Poll for new messages
 function startMessagePolling() {
     // Poll every 2 seconds

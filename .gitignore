@@ -1,7 +1,7 @@
 messaging-app/database.json
 messaging-app/node_modules/
 messaging-app/dist/
-fastapi-backend/venv/
+venv/
 **/*.db
 __pycache__/
 /.idea
