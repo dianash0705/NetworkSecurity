@@ -1,11 +1,13 @@
 // API Base URL - FastAPI backend (use 127.0.0.1 to match server binding)
 const API_BASE = 'http://127.0.0.1:8000';
+const WS_BASE = 'ws://127.0.0.1:8000';
 
 let currentUser = null;
 let selectedContact = null;
-let allUsers = [];
+let allUsers = [];  // List of friend usernames
 let pollInterval = null;
 let lastMessageId = 0;  // Track last seen message to detect new ones
+let ws = null;  // WebSocket connection for real-time notifications
 
 // Vibe emojis for user statuses
 const vibeEmojis = ['🌸', '✨', '🌙', '🍃', '🦋', '🌺', '💫', '🌈', '🍀', '☁️', '🎀', '🧸'];
@@ -63,10 +65,13 @@ async function login() {
             app.style.display = 'block';
             currentUserDisplay.textContent = `Logged in as ${currentUser}`;
             
-            // Fetch all registered users from backend
-            await fetchAllUsers();
+            // Fetch friends list from backend
+            await fetchFriends();
             
-            // Start polling for new messages
+            // Connect WebSocket for real-time notifications
+            connectWebSocket();
+            
+            // Start polling for new messages (as fallback)
             startMessagePolling();
         } else {
             status.textContent = '❌ Failed to connect';
@@ -83,22 +88,118 @@ function getRandomVibe() {
     return vibeEmojis[Math.floor(Math.random() * vibeEmojis.length)];
 }
 
+// --- WebSocket Connection for Real-Time Notifications ---
+function connectWebSocket() {
+    if (ws) {
+        ws.close();
+    }
+    
+    ws = new WebSocket(`${WS_BASE}/ws/${currentUser}`);
+    
+    ws.onopen = () => {
+        console.log('🔌 WebSocket connected for real-time notifications');
+        // Send periodic pings to keep connection alive
+        setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send('ping');
+            }
+        }, 30000);
+    };
+    
+    ws.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            console.log('📨 WebSocket message received:', data);
+            
+            if (data.type === 'new_message') {
+                // Show popup notification
+                showNotification(data.sender, data.encrypted_content);
+                
+                // If we're currently viewing the conversation with this sender, refresh it
+                if (selectedContact === data.sender) {
+                    loadConversationFromBackend(data.sender);
+                }
+            } else if (data.type === 'new_friend') {
+                // Someone added us as a friend
+                if (!allUsers.includes(data.username)) {
+                    allUsers.push(data.username);
+                    renderContacts();
+                    showNotification(data.username, `${data.username} added you as a friend! 🎉`);
+                }
+            }
+        } catch (e) {
+            // Ignore non-JSON messages (like "pong")
+            console.log('WS:', event.data);
+        }
+    };
+    
+    ws.onclose = () => {
+        console.log('🔌 WebSocket disconnected, reconnecting in 3s...');
+        setTimeout(() => {
+            if (currentUser) {
+                connectWebSocket();
+            }
+        }, 3000);
+    };
+    
+    ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+    };
+}
+
 function getInitials(name) {
     return name.charAt(0).toUpperCase();
 }
 
-// Fetch all users from backend
-async function fetchAllUsers() {
+// Fetch friends list from backend
+async function fetchFriends() {
     try {
-        const response = await fetch(`${API_BASE}/users`);
+        const response = await fetch(`${API_BASE}/friends/${currentUser}`);
         if (response.ok) {
-            const users = await response.json();
-            allUsers = users.map(u => u.username).filter(u => u !== currentUser);
+            const data = await response.json();
+            allUsers = data.friends.map(f => f.username);
         }
     } catch (error) {
-        console.error('Error fetching users:', error);
+        console.error('Error fetching friends:', error);
     }
     renderContacts();
+}
+
+// Add a friend (server-validated: must be a registered user)
+async function addFriend(friendUsername) {
+    if (!friendUsername || friendUsername === currentUser) return;
+    
+    if (allUsers.includes(friendUsername)) {
+        alert(`${friendUsername} is already your friend!`);
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${API_BASE}/add-friend`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                username: currentUser,
+                friend_username: friendUsername
+            })
+        });
+        
+        const result = await response.json();
+        
+        if (response.ok) {
+            if (result.status === 'already_friends') {
+                alert(result.message);
+            } else {
+                allUsers.push(friendUsername);
+                renderContacts();
+            }
+        } else {
+            alert(result.detail || 'Failed to add friend');
+        }
+    } catch (error) {
+        console.error('Error adding friend:', error);
+        alert('Server error. Please try again.');
+    }
 }
 
 function addUserToList(username) {
@@ -211,7 +312,7 @@ function renderContacts() {
             <div style="text-align: center; padding: 20px; color: var(--text-secondary);">
                 <div style="font-size: 32px; margin-bottom: 8px;">🌙</div>
                 <p>No friends yet...</p>
-                <input type="text" id="newContactInput" placeholder="Add username" 
+                <input type="text" id="newContactInput" placeholder="Enter username" 
                     style="margin-top: 12px; padding: 8px 12px; border: 2px solid var(--lavender-dark); 
                     border-radius: 12px; font-family: inherit; font-size: 12px; width: 100%;">
                 <button id="addContactBtn" 
@@ -219,6 +320,7 @@ function renderContacts() {
                     background: var(--mint); cursor: pointer; font-family: inherit; font-weight: 600;">
                     Add Friend 🌸
                 </button>
+                <div id="addFriendError" style="margin-top: 8px; font-size: 12px; color: var(--peach-dark);"></div>
             </div>
         `;
         
@@ -228,12 +330,12 @@ function renderContacts() {
             if (addBtn && input) {
                 addBtn.onclick = () => {
                     const name = input.value.trim();
-                    if (name) addUserToList(name);
+                    if (name) addFriend(name);
                 };
                 input.onkeypress = (e) => {
                     if (e.key === 'Enter') {
                         const name = input.value.trim();
-                        if (name) addUserToList(name);
+                        if (name) addFriend(name);
                     }
                 };
             }
@@ -261,7 +363,7 @@ function renderContacts() {
             addBtn.onclick = () => {
                 const name = input.value.trim();
                 if (name) {
-                    addUserToList(name);
+                    addFriend(name);
                     input.value = '';
                 }
             };
@@ -269,7 +371,7 @@ function renderContacts() {
                 if (e.key === 'Enter') {
                     const name = input.value.trim();
                     if (name) {
-                        addUserToList(name);
+                        addFriend(name);
                         input.value = '';
                     }
                 }
@@ -286,10 +388,6 @@ function renderContacts() {
             <div class="contact-avatar">${getInitials(user)}</div>
             <div class="contact-info">
                 <div class="contact-name">${user}</div>
-                <div class="contact-status">
-                    <span class="status-dot online"></span>
-                    <span style="color: var(--text-secondary);">Available</span>
-                </div>
             </div>
             <span class="contact-vibe">${vibe}</span>
         `;
@@ -302,13 +400,7 @@ async function selectContact(user) {
     selectedContact = user;
     lastMessageId = 0;  // Reset to load all messages for this conversation
     
-    chatWith.innerHTML = `
-        <div class="chat-header-avatar">${getInitials(user)}</div>
-        <div class="chat-header-info">
-            <h3>${user}</h3>
-            <span>🟢 Available</span>
-        </div>
-    `;
+    updateChatHeader(user);
     
     messagesDiv.style.display = 'flex';
     inputArea.style.display = 'flex';
@@ -319,6 +411,15 @@ async function selectContact(user) {
     // Load conversation history from backend
     await loadConversationFromBackend(user);
     messageInput.focus();
+}
+
+function updateChatHeader(user) {
+    chatWith.innerHTML = `
+        <div class="chat-header-avatar">${getInitials(user)}</div>
+        <div class="chat-header-info">
+            <h3>${user}</h3>
+        </div>
+    `;
 }
 
 // Load conversation from backend
@@ -410,8 +511,8 @@ async function sendMessage() {
 }
 // Poll for new messages
 function startMessagePolling() {
-    // Poll every 500ms for near real-time feel
-    pollInterval = setInterval(pollForUpdates, 500);
+    // Poll every 2s as fallback (WebSocket handles real-time)
+    pollInterval = setInterval(pollForUpdates, 2000);
     pollForUpdates(); // Fetch immediately
 }
 
@@ -457,16 +558,13 @@ async function checkForNewMessagesFromOthers() {
             for (const msg of messages) {
                 console.log(`📩 Processing message from ${msg.sender}: ${msg.encrypted_content}`);
                 
-                // Add sender to contacts automatically
-                addUserToList(msg.sender);
-                
                 // Show notification for ALL new messages
                 console.log(`🔔 Calling showNotification for ${msg.sender}...`);
                 showNotification(msg.sender, msg.encrypted_content);
             }
             
             if (messages.length > 0) {
-                await fetchAllUsers();
+                await fetchFriends();
             }
         } else {
             console.error(`❌ Fetch messages failed with status: ${response.status}`);
@@ -522,4 +620,5 @@ function appendMessage(msg, scroll = true) {
 // Cleanup on page unload
 window.addEventListener('beforeunload', () => {
     if (pollInterval) clearInterval(pollInterval);
+    if (ws) ws.close();
 });
