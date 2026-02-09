@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends
-from sqlalchemy import create_engine, Column, String, Integer, Boolean, DateTime, ForeignKey
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import create_engine, Column, String, Integer, Boolean, DateTime, ForeignKey, or_, and_
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
@@ -137,6 +138,15 @@ async def lifespan(app: FastAPI):
     print(f"[{datetime.utcnow()}] Scheduler stopped")
 
 app = FastAPI(title="E2E TeaTime Backend", lifespan=lifespan)
+
+# CORS middleware to allow frontend requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Dependency
 def get_db():
@@ -349,6 +359,22 @@ def check_onetime_keys(username: str, db: Session = Depends(get_db)):
         **keys_status,
         "threshold": ONETIME_KEY_THRESHOLD
     }
+
+@app.get("/users", response_model=List[UserOut], tags=["User Actions"])
+def list_users(db: Session = Depends(get_db)):
+    """Get all registered users."""
+    return db.query(User).all()
+
+@app.get("/conversation/{user1}/{user2}", tags=["User Actions"])
+def get_conversation(user1: str, user2: str, db: Session = Depends(get_db)):
+    """Get conversation history between two users."""
+    messages = db.query(Message).filter(
+        or_(
+            and_(Message.sender == user1, Message.receiver == user2),
+            and_(Message.sender == user2, Message.receiver == user1)
+        )
+    ).order_by(Message.timestamp).all()
+    return messages
 
 @app.get("/get-public-key/{username}", tags=["User Actions"])
 def get_key(username: str, db: Session = Depends(get_db)):
