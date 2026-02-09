@@ -248,29 +248,6 @@ body {
     margin-bottom: 2px;
 }
 
-.contact-status {
-    font-size: 12px;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-}
-
-.status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    animation: pulse 2s ease-in-out infinite;
-}
-
-.status-dot.online {
-    background: var(--mint-dark);
-}
-
-.status-dot.offline {
-    background: var(--text-secondary);
-    animation: none;
-}
-
 .contact-vibe {
     font-size: 18px;
 }
