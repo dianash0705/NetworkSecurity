@@ -1,10 +1,11 @@
-// API Base URL - FastAPI backend
-const API_BASE = 'http://localhost:8000';
+// API Base URL - FastAPI backend (use 127.0.0.1 to match server binding)
+const API_BASE = 'http://127.0.0.1:8000';
 
 let currentUser = null;
 let selectedContact = null;
 let allUsers = [];
 let pollInterval = null;
+let lastMessageId = 0;  // Track last seen message to detect new ones
 
 // Vibe emojis for user statuses
 const vibeEmojis = ['🌸', '✨', '🌙', '🍃', '🦋', '🌺', '💫', '🌈', '🍀', '☁️', '🎀', '🧸'];
@@ -108,17 +109,45 @@ function addUserToList(username) {
 }
 
 // Show notification popup
+let notificationCount = 0;
+
 function showNotification(sender, message) {
+    console.log(`🔔 SHOWING NOTIFICATION from ${sender}: ${message}`);
+    
+    // Debug alert - remove after testing
+    // alert(`New message from ${sender}: ${message}`);
+    
+    // Calculate position for stacking notifications
+    const offset = notificationCount * 90;
+    notificationCount++;
+    
     // In-app notification toast
     const toast = document.createElement('div');
     toast.className = 'notification-toast';
+    toast.style.cssText = `
+        position: fixed;
+        top: ${20 + offset}px;
+        right: 20px;
+        background: white;
+        border-radius: 16px;
+        padding: 16px 20px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        z-index: 99999;
+        cursor: pointer;
+        max-width: 320px;
+        border-left: 4px solid #98FB98;
+        animation: slideIn 0.3s ease-out;
+    `;
     toast.innerHTML = `
-        <div class="notification-avatar">${getInitials(sender)}</div>
-        <div class="notification-content">
-            <div class="notification-sender">${sender}</div>
-            <div class="notification-text">${escapeHtml(message.substring(0, 50))}${message.length > 50 ? '...' : ''}</div>
+        <div style="width: 44px; height: 44px; border-radius: 50%; background: linear-gradient(135deg, #FFDAB9, #FFE4EC); display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 700;">${getInitials(sender)}</div>
+        <div style="flex: 1; min-width: 0;">
+            <div style="font-weight: 700; font-size: 14px; margin-bottom: 2px;">${sender}</div>
+            <div style="color: #8E8A9D; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(message.substring(0, 50))}${message.length > 50 ? '...' : ''}</div>
         </div>
-        <button class="notification-close">✕</button>
+        <button style="background: none; border: none; cursor: pointer; padding: 4px; font-size: 14px; opacity: 0.6;" class="notification-close">✕</button>
     `;
     
     // Click to open conversation
@@ -126,22 +155,28 @@ function showNotification(sender, message) {
         if (!e.target.classList.contains('notification-close')) {
             addUserToList(sender);
             selectContact(sender);
-            toast.remove();
+            removeToast(toast);
         }
     };
     
     toast.querySelector('.notification-close').onclick = (e) => {
         e.stopPropagation();
-        toast.remove();
+        removeToast(toast);
     };
     
     document.body.appendChild(toast);
+    console.log(`✅ Toast appended to body`);
+    
+    // Play notification sound (optional visual flash as fallback)
+    try {
+        document.body.style.boxShadow = 'inset 0 0 100px rgba(152, 251, 152, 0.5)';
+        setTimeout(() => { document.body.style.boxShadow = ''; }, 300);
+    } catch (e) {}
     
     // Auto remove after 5 seconds
     setTimeout(() => {
         if (toast.parentNode) {
-            toast.classList.add('fade-out');
-            setTimeout(() => toast.remove(), 300);
+            removeToast(toast);
         }
     }, 5000);
     
@@ -152,6 +187,20 @@ function showNotification(sender, message) {
             icon: '🍵'
         });
     }
+}
+
+function removeToast(toast) {
+    toast.classList.add('fade-out');
+    setTimeout(() => {
+        toast.remove();
+        notificationCount = Math.max(0, notificationCount - 1);
+    }, 300);
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
 function renderContacts() {
@@ -251,6 +300,7 @@ function renderContacts() {
 
 async function selectContact(user) {
     selectedContact = user;
+    lastMessageId = 0;  // Reset to load all messages for this conversation
     
     chatWith.innerHTML = `
         <div class="chat-header-avatar">${getInitials(user)}</div>
@@ -277,6 +327,10 @@ async function loadConversationFromBackend(contact) {
         const response = await fetch(`${API_BASE}/conversation/${currentUser}/${contact}`);
         if (response.ok) {
             const messages = await response.json();
+            // Update lastMessageId to track what we've seen
+            if (messages.length > 0) {
+                lastMessageId = Math.max(...messages.map(m => m.id));
+            }
             renderMessages(messages);
         } else {
             renderMessages([]);
@@ -331,6 +385,7 @@ async function sendMessage() {
         });
 
         if (response.ok) {
+<<<<<<< HEAD
             // ב-UI המקומי אנחנו מציגים את הטקסט המקורי (כדי שהשולח יבין מה הוא כתב)
             const localMsg = {
                 sender: currentUser,
@@ -340,9 +395,14 @@ async function sendMessage() {
             };
             
             appendMessage(localMsg);
+=======
+>>>>>>> dfecb86561c436adaf864a6c016ecae472f8ac89
             messageInput.value = '';
             
             addUserToList(selectedContact);
+            
+            // Reload conversation to get the message with proper server ID
+            await loadConversationFromBackend(selectedContact);
         } else {
             const error = await response.json();
             alert('Failed to send: ' + error.detail);
@@ -353,52 +413,72 @@ async function sendMessage() {
 }
 // Poll for new messages
 function startMessagePolling() {
-    // Poll every 2 seconds
-    pollInterval = setInterval(fetchNewMessages, 2000);
-    fetchNewMessages(); // Fetch immediately
+    // Poll every 500ms for near real-time feel
+    pollInterval = setInterval(pollForUpdates, 500);
+    pollForUpdates(); // Fetch immediately
 }
 
-async function fetchNewMessages() {
+// Main polling function - checks for new messages in current conversation
+async function pollForUpdates() {
     if (!currentUser) return;
 
     try {
-        const response = await fetch(`${API_BASE}/fetch-messages/${currentUser}`);
-        if (response.ok) {
-            const messages = await response.json();
-            
-            if (messages.length > 0) {
-                console.log(`🔔 Fetched ${messages.length} new messages for ${currentUser}:`, messages);
+        // If viewing a conversation, poll that conversation directly
+        if (selectedContact) {
+            const response = await fetch(`${API_BASE}/conversation/${currentUser}/${selectedContact}`);
+            if (response.ok) {
+                const messages = await response.json();
                 
-                for (const msg of messages) {
-                    console.log(`📩 New message from ${msg.sender}: ${msg.encrypted_content}`);
-                    
-                    // Add sender to contacts automatically (even if not a friend yet)
-                    addUserToList(msg.sender);
-                    
-                    // Always show notification for new messages
-                    showNotification(msg.sender, msg.encrypted_content);
-                    
-                    // If viewing this conversation, also append to chat
-                    if (selectedContact === msg.sender) {
-                        appendMessage({
-                            sender: msg.sender,
-                            receiver: msg.receiver,
-                            encrypted_content: msg.encrypted_content,
-                            timestamp: msg.timestamp
-                        });
-                    }
+                // Check if there are new messages (compare count or last message id)
+                const newLastId = messages.length > 0 ? Math.max(...messages.map(m => m.id)) : 0;
+                
+                if (newLastId > lastMessageId) {
+                    console.log(`🔔 New messages detected! (last: ${lastMessageId}, new: ${newLastId})`);
+                    lastMessageId = newLastId;
+                    renderMessages(messages);
                 }
-                
-                // Refresh user list if new messages arrived
-                await fetchAllUsers();
             }
-        } else {
-            console.error('Fetch messages failed:', response.status);
         }
+        
+        // Also check for messages from other users (notifications)
+        await checkForNewMessagesFromOthers();
+        
     } catch (error) {
         console.error('Polling error:', error);
     }
 }
+
+// Check for undelivered messages from users other than current conversation
+async function checkForNewMessagesFromOthers() {
+    try {
+        console.log(`🔍 Checking for new messages for ${currentUser}...`);
+        const response = await fetch(`${API_BASE}/fetch-messages/${currentUser}`);
+        if (response.ok) {
+            const messages = await response.json();
+            console.log(`📬 Got ${messages.length} new messages:`, messages);
+            
+            for (const msg of messages) {
+                console.log(`📩 Processing message from ${msg.sender}: ${msg.encrypted_content}`);
+                
+                // Add sender to contacts automatically
+                addUserToList(msg.sender);
+                
+                // Show notification for ALL new messages
+                console.log(`🔔 Calling showNotification for ${msg.sender}...`);
+                showNotification(msg.sender, msg.encrypted_content);
+            }
+            
+            if (messages.length > 0) {
+                await fetchAllUsers();
+            }
+        } else {
+            console.error(`❌ Fetch messages failed with status: ${response.status}`);
+        }
+    } catch (error) {
+        console.error('Check messages error:', error);
+    }
+}
+
 
 function renderMessages(messages) {
     messagesDiv.innerHTML = '';
@@ -440,12 +520,6 @@ function appendMessage(msg, scroll = true) {
     if (scroll) {
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
     }
-}
-
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
 }
 
 // Cleanup on page unload
