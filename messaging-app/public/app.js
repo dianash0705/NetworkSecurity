@@ -385,7 +385,6 @@ async function sendMessage() {
         });
 
         if (response.ok) {
-<<<<<<< HEAD
             // ב-UI המקומי אנחנו מציגים את הטקסט המקורי (כדי שהשולח יבין מה הוא כתב)
             const localMsg = {
                 sender: currentUser,
@@ -395,8 +394,6 @@ async function sendMessage() {
             };
             
             appendMessage(localMsg);
-=======
->>>>>>> dfecb86561c436adaf864a6c016ecae472f8ac89
             messageInput.value = '';
             
             addUserToList(selectedContact);
