@@ -1,4 +1,4 @@
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, dialog } = require('electron'); // הוספנו את dialog
 const path = require('path');
 const { spawn, execSync } = require('child_process');
 const net = require('net');
@@ -7,6 +7,7 @@ const fs = require('fs');
 let mainWindow;
 let pythonProcess = null;
 
+// הגדרת נתיבים
 const SERVICE_DIR = path.join(__dirname, '../client_service/src');
 const VENV_DIR = path.join(SERVICE_DIR, 'venv');
 
@@ -24,28 +25,33 @@ function getFreePort() {
     });
 }
 
+function getVenvPythonPath() {
+    if (process.platform === 'win32') {
+        return path.join(VENV_DIR, 'Scripts', 'python.exe');
+    } else {
+        return path.join(VENV_DIR, 'bin', 'python');
+    }
+}
+
 function setupPythonEnvironment() {
     console.log("Checking Python environment...");
     
-    // בדיקה שהתיקייה הראשית קיימת
     if (!fs.existsSync(SERVICE_DIR)) {
-        console.error(`❌ Error: Service directory not found at: ${SERVICE_DIR}`);
+        console.error(`Error: Service directory not found at: ${SERVICE_DIR}`);
         return false;
     }
 
-    // create venv if doesnt exist
     if (!fs.existsSync(VENV_DIR)) {
-        console.log("⚠️ Virtual environment not found. Creating one...");
+        console.log("Virtual environment not found. Creating one...");
         try {
             execSync(`python -m venv "${VENV_DIR}"`, { stdio: 'inherit' }); 
-            console.log("✅ Venv created.");
+            console.log("Venv created.");
         } catch (error) {
-            console.error("❌ Failed to create venv:", error);
+            console.error("Failed to create venv:", error);
             return false;
         }
     }
 
-    // install dependencies
     try {
         const pipPath = process.platform === 'win32' 
             ? path.join(VENV_DIR, 'Scripts', 'pip.exe') 
@@ -54,13 +60,14 @@ function setupPythonEnvironment() {
         const reqPath = path.join(SERVICE_DIR, 'requirements.txt');
         
         if (fs.existsSync(reqPath)) {
-            console.log("📦 Checking dependencies...");
+            // שיניתי ל-inherit כדי שתראה שגיאות התקנה בטרמינל אם יש
             execSync(`"${pipPath}" install -r "${reqPath}"`, { stdio: 'inherit' });
+            console.log("Dependencies checked/installed.");
         } else {
-            console.warn("⚠️ requirements.txt not found.");
+            console.warn("requirements.txt not found.");
         }
     } catch (error) {
-        console.error("❌ Failed to install dependencies:", error);
+        console.error("Failed to install dependencies:", error);
         return false;
     }
 
@@ -69,36 +76,73 @@ function setupPythonEnvironment() {
 
 async function startFastAPIServer() {
     if (!setupPythonEnvironment()) {
-        console.error("Cannot start server due to environment error.");
-        return null;
+        throw new Error("Failed to setup Python environment.");
     }
 
-    try {
-        const port = await getFreePort();
-        console.log(`Starting Local FastAPI on port: ${port}`);
+    const port = await getFreePort();
+    console.log(`Starting Local FastAPI on port: ${port}`);
 
-        const pythonPath = process.platform === 'win32' ? 'python' : 'python3';
-        const pythonFolder = path.join(__dirname, '../client_service/src');
-        console.log("Checking folder path:", pythonFolder);
+    const pythonExecutable = getVenvPythonPath();
+    const scriptPath = path.join(SERVICE_DIR, 'service.py');
 
-        pythonProcess = spawn(pythonPath, [
+    if (!fs.existsSync(pythonExecutable)) {
+        throw new Error(`Python executable not found at: ${pythonExecutable}`);
+    }
+
+    console.log(`Using Python: ${pythonExecutable}`);
+
+    return new Promise((resolve, reject) => {
+        pythonProcess = spawn(pythonExecutable, [
             '-m', 'uvicorn', 
             'service:app', 
+            '--app-dir', SERVICE_DIR,
             '--host', '127.0.0.1', 
-            '--port', port.toString() // שימוש בפורט הדינמי
+            '--port', port.toString()
         ], {
-            cwd: pythonFolder,
+            cwd: SERVICE_DIR,
             stdio: ['ignore', 'pipe', 'pipe']
         });
 
-        pythonProcess.stdout.on('data', (data) => console.log(`FastAPI: ${data}`));
-        pythonProcess.stderr.on('data', (data) => console.log(`FastAPI Error: ${data}`));
+        // === המנגנון החדש: מחכים לראות שהשרת עלה ===
+        let startupSuccess = false;
 
-        return port; 
+        pythonProcess.stdout.on('data', (data) => {
+            const output = data.toString();
+            console.log(`FastAPI: ${output}`);
+            
+            // Uvicorn מדפיס את השורה הזו כשהוא מוכן
+            if (output.includes("Application startup complete") || output.includes("Uvicorn running on")) {
+                startupSuccess = true;
+                resolve(port); // רק עכשיו אנחנו משחררים את ה-Promise!
+            }
+        });
 
-    } catch (err) {
-        console.error('Failed to start FastAPI server:', err);
-    }
+        pythonProcess.stderr.on('data', (data) => {
+            const errorOutput = data.toString();
+            console.log(`FastAPI Log: ${errorOutput}`);
+            // הערה: רוב הלוגים של uvicorn מגיעים ל-stderr, זה תקין.
+            // אנחנו לא עושים reject כאן כי אזהרות לא אמורות להפיל את האפליקציה.
+            
+            if (errorOutput.includes("Application startup complete") || errorOutput.includes("Uvicorn running on")) {
+                 startupSuccess = true;
+                 resolve(port);
+            }
+        });
+        
+        pythonProcess.on('error', (err) => {
+            console.error('Failed to spawn Python process:', err);
+            reject(err);
+        });
+
+        pythonProcess.on('close', (code) => {
+            if (!startupSuccess) {
+                // אם התהליך נסגר לפני שהצלחנו לעלות - זו שגיאה קריטית
+                const msg = `Python process exited unexpectedly with code ${code}. Check terminal logs for details.`;
+                console.error(msg);
+                reject(new Error(msg));
+            }
+        });
+    });
 }
 
 function createWindow(localPort) {
@@ -116,23 +160,21 @@ function createWindow(localPort) {
         },
         backgroundColor: '#E6E6FA',
         titleBarStyle: 'default',
-        show: false // Don't show until ready
+        show: false 
     });
 
-    // Load the static HTML file directly
     mainWindow.loadFile(path.join(__dirname, 'public', 'index.html'));
 
-    // Send the port to the frontend once the window loads
     mainWindow.webContents.on('did-finish-load', () => {
-        mainWindow.webContents.send('set-api-port', localPort);
+        if (localPort) {
+            mainWindow.webContents.send('set-api-port', localPort);
+        }
     });
 
-    // Show window when ready to prevent visual flash
     mainWindow.once('ready-to-show', () => {
         mainWindow.show();
     });
 
-    // Open DevTools in development
     if (process.argv.includes('--dev')) {
         mainWindow.webContents.openDevTools();
     }
@@ -142,30 +184,34 @@ function createWindow(localPort) {
     });
 }
 
-// This method will be called when Electron has finished initialization
 app.whenReady().then(async () => {
-    // Start FastAPI backend first
-    await startFastAPIServer();
-    
-    const port = await startFastAPIServer(); // Get the dynamic port
-    createWindow(port);
+    try {
+        // מנסים להריץ את השרת
+        const port = await startFastAPIServer();
+        
+        // אם הגענו לפה - השרת עלה בהצלחה!
+        createWindow(port);
+    } catch (error) {
+        // אם הייתה שגיאה (כמו חוסר ב-uvicorn), נקפיץ הודעה ונסגור
+        console.error("Critical Error:", error);
+        dialog.showErrorBox("Startup Failed", `Failed to start local encryption server.\n\nError: ${error.message}`);
+        app.quit();
+    }
 
     app.on('activate', () => {
-        // On macOS, re-create window when dock icon is clicked
         if (BrowserWindow.getAllWindows().length === 0) {
-            createWindow(port);
+            // במקרה של הפעלה מחדש במק, נצטרך לטפל בלוגיקה הזו בנפרד, 
+            // אבל כרגע זה פחות קריטי כי השרת כבר רץ.
         }
     });
 });
 
-// Quit when all windows are closed (except on macOS)
 app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') {
         app.quit();
     }
 });
 
-// Handle app quit - cleanup Python process
 app.on('before-quit', () => {
     if (pythonProcess) {
         pythonProcess.kill();

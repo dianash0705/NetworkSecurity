@@ -25,7 +25,7 @@ class EncryptResponse(BaseModel):
     ciphertext_b64: str
 
 
-@app.post("/encrypt_message")
+@app.post("/encrypt-message")
 def encrypt_message(encrypt_request: EncryptRequest) -> EncryptResponse:
     plaintext = base64.b64decode(encrypt_request.plaintext_b64)
     authenticated_data = base64.b64decode(encrypt_request.authenticated_data_b64)
@@ -57,7 +57,7 @@ class DecryptResponse(BaseModel):
     plaintext: str
 
 
-@app.post("/decrypt_message")
+@app.post("/decrypt-message")
 def encrypt_message(decrypt_request: DecryptRequest) -> DecryptResponse:
     header = base64.b64decode(decrypt_request.header_b64)
     ciphertext = base64.b64decode(decrypt_request.ciphertext_b64)
@@ -85,7 +85,7 @@ class X3DHCreateIdentityKeyResponse(BaseModel):
     x3dh_identity_key: X3DHIdentityKey
 
 
-@app.post("/3xdh_create_identity_key")
+@app.post("/3xdh-create-identity-key")
 def x3dh_create_identity_key() -> X3DHCreateIdentityKeyResponse:
     identity_key_pair = x3dh.create_identity_key()
 
@@ -105,7 +105,7 @@ class X3DHCreateNewPreKeyResponse(BaseModel):
     prekey_signature_b64: str
 
 
-@app.post("/x3dh_create_new_prekey")
+@app.post("/x3dh-create-new-prekey")
 def x3dh_create_new_prekey(request: X3DHCreateNewPreKeyRequest) -> X3DHCreateNewPreKeyResponse:
     ik_priv = X25519PrivateKey.from_private_bytes(base64.b64decode(request.x3dh_identity_key.identity_key_private_b64))
     ik_pub = X25519PublicKey.from_public_bytes(base64.b64decode(request.x3dh_identity_key.identity_key_public_b64))
@@ -138,7 +138,7 @@ class DoX3DHByInitiatorResponse(BaseModel):
     associated_data_b64: str
 
 
-@app.post("/do_x3dh_by_initiator")
+@app.post("/do-x3dh-by-initiator")
 def do_x3dh_by_initiator(request: DoX3DHByInitiatorReqeust) -> DoX3DHByInitiatorResponse:
     self_identity_key = X25519PrivateKey.from_private_bytes(base64.b64decode(request.self_identity_key))
     self_identity_key_public = X25519PublicKey.from_public_bytes(base64.b64decode(request.self_identity_key_public))
@@ -176,7 +176,7 @@ class DoX3DHByReceiverResponse(BaseModel):
     shared_secret_key_b64: str
 
 
-@app.post("/do_x3dh_by_receiver")
+@app.post("/do-x3dh-by-receiver")
 def do_x3dh_by_receiver(request: DoX3DHByReceiverReqeust) -> DoX3DHByReceiverResponse:
     self_identity_key_private = X25519PrivateKey.from_private_bytes(
         base64.b64decode(request.self_identity_key_private_b64))
