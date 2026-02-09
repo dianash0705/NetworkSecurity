@@ -9,6 +9,9 @@ from typing import List, Dict
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
 import json
+import base64
+import os
+from nacl.public import PublicKey, SealedBox
 
 # --- Database Setup ---
 SQLALCHEMY_DATABASE_URL = "sqlite:///./teatime_backend.db"
@@ -75,6 +78,13 @@ class PrekeyUpdate(BaseModel):
 class FriendRequest(BaseModel):
     username: str
     friend_username: str
+
+class AuthChallenge(BaseModel):
+    username: str
+
+class AuthVerify(BaseModel):
+    username: str
+    challenge_response: str
 
 class MessageSend(BaseModel):
     sender: str
@@ -156,6 +166,9 @@ class ConnectionManager:
                 ]
 
 manager = ConnectionManager()
+
+# --- Auth Session Storage (in-memory challenge store) ---
+auth_sessions: Dict[str, str] = {}  # username -> challenge_hex
 
 # --- Scheduler Setup ---
 scheduler = BackgroundScheduler()
@@ -240,7 +253,68 @@ def get_onetime_keys_status(username: str, db: Session) -> dict:
 
 # --- User API Endpoints ---
 
-@app.post("/register", tags=["User Actions"])
+@app.get("/user-exists/{username}", tags=["Authentication"])
+def user_exists(username: str, db: Session = Depends(get_db)):
+    """Check if a username is already registered."""
+    user = db.query(User).filter(User.username == username).first()
+    return {"exists": user is not None}
+
+@app.post("/auth/challenge", tags=["Authentication"])
+def auth_challenge(data: AuthChallenge, db: Session = Depends(get_db)):
+    """
+    Step 1 of challenge-response authentication.
+    Server generates a random challenge, encrypts it with the user's
+    identity_key_public using SealedBox, and stores the original challenge.
+    The client must decrypt with their private key and send it back.
+    """
+    user = db.query(User).filter(User.username == data.username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Generate random 32-byte challenge
+    challenge_bytes = os.urandom(32)
+    challenge_hex = challenge_bytes.hex()
+    
+    # Store the challenge in session
+    auth_sessions[data.username] = challenge_hex
+    print(f"[AUTH] Challenge generated for {data.username}: {challenge_hex[:16]}...")
+    
+    # Encrypt the challenge with the user's public key using SealedBox
+    try:
+        public_key_bytes = base64.b64decode(user.identity_key_public)
+        public_key = PublicKey(public_key_bytes)
+        sealed_box = SealedBox(public_key)
+        encrypted_challenge = sealed_box.encrypt(challenge_bytes)
+        encrypted_challenge_b64 = base64.b64encode(encrypted_challenge).decode('utf-8')
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Encryption failed: {str(e)}")
+    
+    return {"encrypted_challenge": encrypted_challenge_b64}
+
+@app.post("/auth/verify", tags=["Authentication"])
+def auth_verify(data: AuthVerify, db: Session = Depends(get_db)):
+    """
+    Step 2 of challenge-response authentication.
+    Client sends back the decrypted challenge. Server compares it
+    with the stored challenge to verify the client holds the private key.
+    """
+    if data.username not in auth_sessions:
+        raise HTTPException(status_code=400, detail="No pending challenge for this user")
+    
+    stored_challenge = auth_sessions[data.username]
+    
+    if data.challenge_response == stored_challenge:
+        # Authentication successful - clean up session
+        del auth_sessions[data.username]
+        print(f"[AUTH] {data.username} authenticated successfully")
+        return {"status": "authenticated", "username": data.username}
+    else:
+        # Wrong answer - clean up and reject
+        del auth_sessions[data.username]
+        print(f"[AUTH] {data.username} failed authentication")
+        raise HTTPException(status_code=401, detail="Authentication failed: incorrect challenge response")
+
+@app.post("/register", tags=["Authentication"])
 def register(user: UserRegister, db: Session = Depends(get_db)):
     """
     Register a new user with X3DH key bundle.
@@ -252,25 +326,16 @@ def register(user: UserRegister, db: Session = Depends(get_db)):
     """
     db_user = db.query(User).filter(User.username == user.username).first()
     if db_user:
-        # Update existing user's keys
-        db_user.public_key = user.public_key
-        db_user.identity_key_public = user.identity_key_public
-        db_user.prekey_public = user.prekey_public
-        db_user.prekey_signature_public = user.prekey_signature_public
-        # Delete old unused onetime keys and add new ones
-        db.query(OneTimeKey).filter(
-            OneTimeKey.username == user.username,
-            OneTimeKey.is_used == False
-        ).delete()
-    else:
-        db_user = User(
-            username=user.username,
-            public_key=user.public_key,
-            identity_key_public=user.identity_key_public,
-            prekey_public=user.prekey_public,
-            prekey_signature_public=user.prekey_signature_public
-        )
-        db.add(db_user)
+        raise HTTPException(status_code=409, detail="Username already exists. Use /auth/challenge to log in.")
+    
+    db_user = User(
+        username=user.username,
+        public_key=user.public_key,
+        identity_key_public=user.identity_key_public,
+        prekey_public=user.prekey_public,
+        prekey_signature_public=user.prekey_signature_public
+    )
+    db.add(db_user)
     
     # Add onetime public keys to the separate table
     for key in user.onetime_keys_public:

@@ -112,6 +112,7 @@ function createWindow(localPort) {
         webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
+            sandbox: false,
             preload: path.join(__dirname, 'preload.js')
         },
         backgroundColor: '#E6E6FA',

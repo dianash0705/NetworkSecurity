@@ -43,44 +43,125 @@ async function login() {
     status.textContent = '🔄 Connecting...';
     
     try {
-        // Register user with the FastAPI backend
-        const response = await fetch(`${API_BASE}/register`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                username: currentUser,
-                public_key: 'placeholder_key_' + currentUser, // Placeholder for now
-                identity_key_public: 'placeholder_key_' + currentUser, // Placeholder for now
-                prekey_public: 'placeholder_key_' + currentUser, // Placeholder for now
-                prekey_signature_public: 'placeholder_key_' + currentUser, // Placeholder for now
-                onetime_keys_public: ['placeholder_key1', 'placeholder_key2'] // Placeholder for now
-            })
-        });
+        // Initialize libsodium crypto engine
+        await window.TeaCrypto.init();
 
-        if (response.ok) {
-            status.textContent = `✨ Connected as ${currentUser}`;
-            usernameInput.disabled = true;
-            loginBtn.disabled = true;
-            loginSection.style.display = 'none';
-            app.style.display = 'block';
-            currentUserDisplay.textContent = `Logged in as ${currentUser}`;
-            
-            // Fetch friends list from backend
-            await fetchFriends();
-            
-            // Connect WebSocket for real-time notifications
-            connectWebSocket();
-            
-            // Start polling for new messages (as fallback)
-            startMessagePolling();
+        // Step 1: Check if user already exists
+        const existsRes = await fetch(`${API_BASE}/user-exists/${encodeURIComponent(username)}`);
+        const existsData = await existsRes.json();
+
+        if (existsData.exists) {
+            // --- Existing user: challenge-response authentication ---
+            status.textContent = '🔐 Authenticating...';
+
+            // Load stored private key from localStorage
+            const storedPub = localStorage.getItem(`teatime_identity_pub_${username}`);
+            const storedSec = localStorage.getItem(`teatime_identity_sec_${username}`);
+
+            if (!storedPub || !storedSec) {
+                status.textContent = '❌ No identity key found for this user on this device';
+                status.classList.add('error');
+                currentUser = null;
+                return;
+            }
+
+            // Request challenge from server
+            const challengeRes = await fetch(`${API_BASE}/auth/challenge`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username })
+            });
+
+            if (!challengeRes.ok) {
+                const err = await challengeRes.json();
+                throw new Error(err.detail || 'Challenge request failed');
+            }
+
+            const { encrypted_challenge } = await challengeRes.json();
+
+            // Decrypt the challenge using our private key (SealedBox)
+            let challengeHex;
+            try {
+                challengeHex = window.TeaCrypto.decryptChallenge(encrypted_challenge, storedPub, storedSec);
+            } catch (e) {
+                console.error('Decryption error:', e);
+                status.textContent = '❌ Authentication failed: could not decrypt challenge';
+                status.classList.add('error');
+                currentUser = null;
+                return;
+            }
+
+            // Send decrypted challenge back for verification
+            const verifyRes = await fetch(`${API_BASE}/auth/verify`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, challenge_response: challengeHex })
+            });
+
+            if (!verifyRes.ok) {
+                const err = await verifyRes.json();
+                status.textContent = `❌ ${err.detail || 'Authentication failed'}`;
+                status.classList.add('error');
+                currentUser = null;
+                return;
+            }
+
+            console.log(`[AUTH] ${username} authenticated via challenge-response`);
+
         } else {
-            status.textContent = '❌ Failed to connect';
-            status.classList.add('error');
+            // --- New user: generate keys and register ---
+            status.textContent = '🔑 Generating identity keys...';
+
+            const keyPair = window.TeaCrypto.generateKeyPair();
+
+            // Store keys in localStorage
+            localStorage.setItem(`teatime_identity_pub_${username}`, keyPair.publicKey);
+            localStorage.setItem(`teatime_identity_sec_${username}`, keyPair.secretKey);
+
+            // Register with the server
+            const response = await fetch(`${API_BASE}/register`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    username: username,
+                    public_key: keyPair.publicKey,
+                    identity_key_public: keyPair.publicKey,
+                    prekey_public: keyPair.publicKey,
+                    prekey_signature_public: keyPair.publicKey,
+                    onetime_keys_public: [keyPair.publicKey, keyPair.publicKey]
+                })
+            });
+
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(err.detail || 'Registration failed');
+            }
+
+            console.log(`[AUTH] ${username} registered with new identity key`);
         }
+
+        // --- Authentication successful — enter the app ---
+        status.textContent = `✨ Connected as ${currentUser}`;
+        usernameInput.disabled = true;
+        loginBtn.disabled = true;
+        loginSection.style.display = 'none';
+        app.style.display = 'block';
+        currentUserDisplay.textContent = `Logged in as ${currentUser}`;
+        
+        // Fetch friends list from backend
+        await fetchFriends();
+        
+        // Connect WebSocket for real-time notifications
+        connectWebSocket();
+        
+        // Start polling for new messages (as fallback)
+        startMessagePolling();
+
     } catch (error) {
         console.error('Login error:', error);
-        status.textContent = '❌ Server not available';
+        status.textContent = `❌ ${error.message || 'Server not available'}`;
         status.classList.add('error');
+        currentUser = null;
     }
 }
 
