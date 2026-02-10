@@ -36,6 +36,9 @@ from .double_ratchet_impl import GENERATE_DH, DH, KDF_RK, KDF_CK, ENCRYPT, DECRY
 # region __Initialization__
 # https://signal.org/docs/specifications/doubleratchet/#dr-initialization
 
+
+
+# sending first message, Alice is the initiator, Bob is the responder
 def RatchetInitAlice(state, SK, bob_dh_public_key):
     state.DHs = GENERATE_DH()
     state.DHr = bob_dh_public_key
@@ -46,6 +49,7 @@ def RatchetInitAlice(state, SK, bob_dh_public_key):
     state.PN = 0
     state.MKSKIPPED = {}
 
+# receiving first message, Bob is the responder, Alice is the initiator
 def RatchetInitBob(state, SK, bob_dh_key_pair):
     state.DHs = bob_dh_key_pair
     state.DHr = None
