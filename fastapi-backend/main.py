@@ -26,6 +26,7 @@ class User(Base):
     identity_key_public = Column(String, nullable=False)
     prekey_public = Column(String, nullable=False)
     prekey_signature_public = Column(String, nullable=False)
+    signing_key_public = Column(String, nullable=True)
     prekey_needs_update = Column(Boolean, default=False)  # Flag to signal client to update prekeys
 
 class OneTimeKey(Base):
@@ -48,8 +49,11 @@ class Message(Base):
     sender = Column(String, ForeignKey("users.username"))
     receiver = Column(String, ForeignKey("users.username"))
     encrypted_content = Column(String, nullable=False)
+    header_b64 = Column(String, nullable=True)  # Double Ratchet header (needed for decryption)
     timestamp = Column(DateTime, default=datetime.utcnow)
     is_delivered = Column(Boolean, default=False)
+    x3dh_ephemeral_public_b64 = Column(String, nullable=True)  # Optional: ephemeral key from X3DH (first message only)
+    x3dh_associated_data_b64 = Column(String, nullable=True)    # Optional: associated data from X3DH (first message only)
 
 Base.metadata.create_all(bind=engine)
 
@@ -64,6 +68,7 @@ class UserRegister(BaseModel):
     identity_key_public: str
     prekey_public: str
     prekey_signature_public: str
+    signing_key_public: str | None = None
     onetime_keys_public: List[str]  # Client should send ~10 onetime public keys
 
 class OneTimeKeyUpload(BaseModel):
@@ -90,6 +95,9 @@ class MessageSend(BaseModel):
     sender: str
     receiver: str
     encrypted_content: str
+    header_b64: str = None  # Double Ratchet header (needed for decryption)
+    x3dh_ephemeral_public_b64: str = None  # Optional: ephemeral key (first message only)
+    x3dh_associated_data_b64: str = None    # Optional: associated data (first message only)
 
 # New Schemas for Admin Views
 class UserOut(BaseModel):
@@ -103,8 +111,11 @@ class MessageOut(BaseModel):
     sender: str
     receiver: str
     encrypted_content: str
+    header_b64: str | None = None
     timestamp: datetime
     is_delivered: bool
+    x3dh_ephemeral_public_b64: str | None = None
+    x3dh_associated_data_b64: str | None = None
     class Config:
         from_attributes = True
 
@@ -333,7 +344,8 @@ def register(user: UserRegister, db: Session = Depends(get_db)):
         public_key=user.public_key,
         identity_key_public=user.identity_key_public,
         prekey_public=user.prekey_public,
-        prekey_signature_public=user.prekey_signature_public
+        prekey_signature_public=user.prekey_signature_public,
+        signing_key_public=user.signing_key_public
     )
     db.add(db_user)
     
@@ -427,6 +439,7 @@ def get_key_bundle(username: str, db: Session = Depends(get_db)):
         "identity_key_public": user.identity_key_public,
         "prekey_public": user.prekey_public,
         "prekey_signature_public": user.prekey_signature_public,
+        "signing_key_public": user.signing_key_public,
         "onetime_key_public": onetime_key_public_value,
         **keys_status
     }
@@ -588,7 +601,10 @@ async def send_message(msg: MessageSend, db: Session = Depends(get_db)):
     new_msg = Message(
         sender=msg.sender,
         receiver=msg.receiver,
-        encrypted_content=msg.encrypted_content
+        encrypted_content=msg.encrypted_content,
+        header_b64=msg.header_b64,
+        x3dh_ephemeral_public_b64=msg.x3dh_ephemeral_public_b64,
+        x3dh_associated_data_b64=msg.x3dh_associated_data_b64
     )
     db.add(new_msg)
     db.commit()
@@ -599,6 +615,9 @@ async def send_message(msg: MessageSend, db: Session = Depends(get_db)):
         "type": "new_message",
         "sender": msg.sender,
         "encrypted_content": msg.encrypted_content,
+        "header_b64": msg.header_b64,
+        "x3dh_ephemeral_public_b64": msg.x3dh_ephemeral_public_b64,
+        "x3dh_associated_data_b64": msg.x3dh_associated_data_b64,
         "timestamp": new_msg.timestamp.isoformat(),
         "message_id": new_msg.id
     })

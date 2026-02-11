@@ -169,6 +169,13 @@ async function login() {
             // Store identity keys in localStorage (private key stays local)
             localStorage.setItem(`teatime_identity_pub_${username}`, keyPair.identity_key_public_b64);
             localStorage.setItem(`teatime_identity_sec_${username}`, keyPair.identity_key_private_b64);
+            // Store Ed25519 signing keypair
+            if (keyPair.signing_key_public_b64) {
+                localStorage.setItem(`teatime_signing_pub_${username}`, keyPair.signing_key_public_b64);
+            }
+            if (keyPair.signing_key_private_b64) {
+                localStorage.setItem(`teatime_signing_priv_${username}`, keyPair.signing_key_private_b64);
+            }
 
             // --- Generate a signed prekey via sidecar ---
             let prekeyData = null;
@@ -222,6 +229,8 @@ async function login() {
                 onetimePubs.push(k.onetime_key_public_b64);
             }
             localStorage.setItem(`teatime_onetime_privs_${username}`, JSON.stringify(onetimePrivs));
+            // Also store public one-time keys locally so receiver can match consumed keys if needed
+            localStorage.setItem(`teatime_onetime_pubs_${username}`, JSON.stringify(onetimePubs));
 
             // Register with the server (send only public key material)
             const response = await fetch(`${API_BASE}/register`, {
@@ -233,6 +242,7 @@ async function login() {
                     identity_key_public: keyPair.identity_key_public_b64,
                     prekey_public: prekeyPubB64,
                     prekey_signature_public: prekeySigB64,
+                    signing_key_public: keyPair.signing_key_public_b64,
                     onetime_keys_public: onetimePubs
                 })
             });
@@ -247,6 +257,12 @@ async function login() {
 
         // --- Authentication successful — enter the app ---
         status.textContent = `✨ Connected as ${currentUser}`;
+        
+        // Set username in encryption service immediately
+        if (window.EncryptionService) {
+            window.EncryptionService.setCurrentUsername(currentUser);
+        }
+
         usernameInput.disabled = true;
         loginBtn.disabled = true;
         loginSection.style.display = 'none';
@@ -351,6 +367,130 @@ async function fetchFriends() {
     renderContacts();
 }
 
+// Helper: Save sent message plaintext locally (since server only has encrypted)
+function saveSentMessage(encryptedContent, plaintext) {
+    try {
+        const key = `teatime_sent_map_${currentUser}`;
+        let map = {};
+        const stored = localStorage.getItem(key);
+        if (stored) {
+            map = JSON.parse(stored);
+        }
+        map[encryptedContent] = plaintext;
+        localStorage.setItem(key, JSON.stringify(map));
+    } catch (e) {
+        console.error("Failed to save sent message plaintext:", e);
+    }
+}
+
+// Helper: Get sent message plaintext
+function getSentMessage(encryptedContent) {
+    try {
+        const key = `teatime_sent_map_${currentUser}`;
+        const stored = localStorage.getItem(key);
+        if (stored) {
+            const map = JSON.parse(stored);
+            return map[encryptedContent];
+        }
+    } catch (e) {
+        return null;
+    }
+    return null;
+}
+
+// Helper: Handle X3DH Receiver Flow
+async function handleReceiverX3DH(senderName, ephemeralKey) {
+    try {
+        // Ensure username is set in encryption service
+        if (window.EncryptionService) {
+            window.EncryptionService.setCurrentUsername(currentUser);
+        }
+
+        // Check if we already have a state for this user to avoid re-consuming keys
+        const stateKey = `teatime_ratchet_state_${currentUser}_${senderName}`;
+        if (localStorage.getItem(stateKey)) {
+            return true; // Already initialized
+        }
+
+        console.log(`[X3DH] Attempting to initialize receiver session for ${senderName}...`);
+
+        // Get our stored keys
+        const ourIdentityPrivate = localStorage.getItem(`teatime_identity_sec_${currentUser}`);
+        const ourPrekeyPrivate = localStorage.getItem(`teatime_prekey_priv_${currentUser}`);
+        
+        // Consume one one-time private key (FIFO)
+        let ourOnetimePrivate = "";
+        const otkJson = localStorage.getItem(`teatime_onetime_privs_${currentUser}`);
+        if (otkJson) {
+            try {
+                const otkArr = JSON.parse(otkJson);
+                if (Array.isArray(otkArr) && otkArr.length > 0) {
+                    ourOnetimePrivate = otkArr.shift();
+                    localStorage.setItem(`teatime_onetime_privs_${currentUser}`, JSON.stringify(otkArr));
+                }
+            } catch (e) {
+                console.error('Failed to parse one-time privs:', e);
+            }
+        }
+
+        if (!ourIdentityPrivate || !ourPrekeyPrivate) {
+            console.error("Missing our keys for X3DH receiver");
+            return false;
+        }
+
+        // Get sender's identity key from key bundle
+        const senderKeyBundleResp = await fetch(`${API_BASE}/get-key-bundle/${senderName}`);
+        if (!senderKeyBundleResp.ok) {
+            console.error(`Failed to get ${senderName}'s key bundle`);
+            return false;
+        }
+        const senderKeyBundle = await senderKeyBundleResp.json();
+
+        // Call X3DH receiver via sidecar
+        const localApiPort = window.EncryptionService.getLocalApiPort();
+        if (!localApiPort) {
+            console.error("Local API port not available");
+            return false;
+        }
+
+        const x3dhReceiverResp = await fetch(`http://127.0.0.1:${localApiPort}/do-x3dh-by-receiver`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                self_identity_key_private_b64: ourIdentityPrivate,
+                self_prekey_private_b64: ourPrekeyPrivate,
+                self_onetime_key_private_b64: ourOnetimePrivate || "",
+                peer_identity_key_public_b64: senderKeyBundle.identity_key_public,
+                peer_ephemeral_key_public_b64: ephemeralKey
+            })
+        });
+
+        if (!x3dhReceiverResp.ok) {
+            console.error('X3DH receiver failed sidecar call');
+            return false;
+        }
+
+        const x3dhReceiverResult = await x3dhReceiverResp.json();
+        const sharedSecret = x3dhReceiverResult.shared_secret_key_b64;
+
+        // Initialize ratchet as receiver
+        const initRatchetSuccess = await window.EncryptionService.initRatchet(
+            senderName,
+            sharedSecret,
+            ourPrekeyPrivate,
+            "receiver"
+        );
+
+        if (initRatchetSuccess) {
+            console.log(`[X3DH] Successfully initialized session with ${senderName}`);
+            return true;
+        }
+    } catch (e) {
+        console.error("[X3DH] Error in handleReceiverX3DH:", e);
+    }
+    return false;
+}
+
 // Add a friend (server-validated: must be a registered user)
 async function addFriend(friendUsername) {
     if (!friendUsername || friendUsername === currentUser) return;
@@ -376,6 +516,14 @@ async function addFriend(friendUsername) {
             if (result.status === 'already_friends') {
                 alert(result.message);
             } else {
+                // New friendship established! 
+                // Clear any stale encryption state to ensure a fresh X3DH handshake
+                const stateKey = `teatime_ratchet_state_${currentUser}_${friendUsername}`;
+                if (localStorage.getItem(stateKey)) {
+                    console.log(`[addFriend] Clearing stale ratchet state for ${friendUsername}`);
+                    localStorage.removeItem(stateKey);
+                }
+
                 allUsers.push(friendUsername);
                 renderContacts();
             }
@@ -471,7 +619,7 @@ function showNotification(sender, message) {
     if ('Notification' in window && Notification.permission === 'granted') {
         new Notification(`🍵 New message from ${sender}`, {
             body: message.substring(0, 100),
-            icon: '🍵'
+            icon: 'icon.png'
         });
     }
 }
@@ -608,8 +756,132 @@ function updateChatHeader(user) {
     `;
 }
 
+// Helper: Save sent message plaintext locally (since server only has encrypted)
+function saveSentMessage(encryptedContent, plaintext) {
+    try {
+        const key = `teatime_sent_map_${currentUser}`;
+        let map = {};
+        const stored = localStorage.getItem(key);
+        if (stored) {
+            map = JSON.parse(stored);
+        }
+        map[encryptedContent] = plaintext;
+        localStorage.setItem(key, JSON.stringify(map));
+    } catch (e) {
+        console.error("Failed to save sent message plaintext:", e);
+    }
+}
+
+// Helper: Get sent message plaintext
+function getSentMessage(encryptedContent) {
+    try {
+        const key = `teatime_sent_map_${currentUser}`;
+        const stored = localStorage.getItem(key);
+        if (stored) {
+            const map = JSON.parse(stored);
+            return map[encryptedContent];
+        }
+    } catch (e) {
+        return null;
+    }
+    return null;
+}
+
+// Helper: Handle X3DH Receiver Flow
+async function handleReceiverX3DH(senderName, ephemeralKey) {
+    try {
+        // Check if we already have a state for this user to avoid re-consuming keys
+        const stateKey = `teatime_ratchet_state_${currentUser}_${senderName}`;
+        if (localStorage.getItem(stateKey)) {
+            return true; // Already initialized
+        }
+
+        console.log(`[X3DH] Attempting to initialize receiver session for ${senderName}...`);
+
+        // Get our stored keys
+        const ourIdentityPrivate = localStorage.getItem(`teatime_identity_sec_${currentUser}`);
+        const ourPrekeyPrivate = localStorage.getItem(`teatime_prekey_priv_${currentUser}`);
+        
+        // Consume one one-time private key (FIFO)
+        let ourOnetimePrivate = "";
+        const otkJson = localStorage.getItem(`teatime_onetime_privs_${currentUser}`);
+        if (otkJson) {
+            try {
+                const otkArr = JSON.parse(otkJson);
+                if (Array.isArray(otkArr) && otkArr.length > 0) {
+                    ourOnetimePrivate = otkArr.shift();
+                    localStorage.setItem(`teatime_onetime_privs_${currentUser}`, JSON.stringify(otkArr));
+                }
+            } catch (e) {
+                console.error('Failed to parse one-time privs:', e);
+            }
+        }
+
+        if (!ourIdentityPrivate || !ourPrekeyPrivate) {
+            console.error("Missing our keys for X3DH receiver");
+            return false;
+        }
+
+        // Get sender's identity key from key bundle
+        const senderKeyBundleResp = await fetch(`${API_BASE}/get-key-bundle/${senderName}`);
+        if (!senderKeyBundleResp.ok) {
+            console.error(`Failed to get ${senderName}'s key bundle`);
+            return false;
+        }
+        const senderKeyBundle = await senderKeyBundleResp.json();
+
+        // Call X3DH receiver via sidecar
+        const localApiPort = window.EncryptionService.getLocalApiPort();
+        if (!localApiPort) {
+            console.error("Local API port not available");
+            return false;
+        }
+
+        const x3dhReceiverResp = await fetch(`http://127.0.0.1:${localApiPort}/do-x3dh-by-receiver`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                self_identity_key_private_b64: ourIdentityPrivate,
+                self_prekey_private_b64: ourPrekeyPrivate,
+                self_onetime_key_private_b64: ourOnetimePrivate || "",
+                peer_identity_key_public_b64: senderKeyBundle.identity_key_public,
+                peer_ephemeral_key_public_b64: ephemeralKey
+            })
+        });
+
+        if (!x3dhReceiverResp.ok) {
+            console.error('X3DH receiver failed sidecar call');
+            return false;
+        }
+
+        const x3dhReceiverResult = await x3dhReceiverResp.json();
+        const sharedSecret = x3dhReceiverResult.shared_secret_key_b64;
+
+        // Initialize ratchet as receiver
+        const initRatchetSuccess = await window.EncryptionService.initRatchet(
+            senderName,
+            sharedSecret,
+            ourPrekeyPrivate,
+            "receiver"
+        );
+
+        if (initRatchetSuccess) {
+            console.log(`[X3DH] Successfully initialized session with ${senderName}`);
+            return true;
+        }
+    } catch (e) {
+        console.error("[X3DH] Error in handleReceiverX3DH:", e);
+    }
+    return false;
+}
+
 // Load conversation from backend
 async function loadConversationFromBackend(contact) {
+    // Ensure username is set in encryption service before rendering/decrypting
+    if (window.EncryptionService) {
+        window.EncryptionService.setCurrentUsername(currentUser);
+    }
+
     try {
         const response = await fetch(`${API_BASE}/conversation/${currentUser}/${contact}`);
         if (response.ok) {
@@ -618,7 +890,7 @@ async function loadConversationFromBackend(contact) {
             if (messages.length > 0) {
                 lastMessageId = Math.max(...messages.map(m => m.id));
             }
-            renderMessages(messages);
+                await renderMessages(messages);
         } else {
             renderMessages([]);
         }
@@ -637,60 +909,196 @@ async function sendMessage() {
     if (!content || !selectedContact) return;
 
     try {
-        // --- שינוי: שימוש בשירות ההצפנה הלוקאלי ---
-        
-        // בדיקה שהשירות קיים (שה-renderer.js נטען)
+        // Encryption service must be loaded
         if (!window.EncryptionService) {
             alert("Encryption service not loaded!");
             return;
         }
 
-        // הצפנה באמצעות ה-Python הלוקאלי
-        const encryptionResult = await window.EncryptionService.encrypt(content, selectedContact);
+        // Set username in encryption service (for per-conversation state management)
+        window.EncryptionService.setCurrentUsername(currentUser);
 
-        if (!encryptionResult) {
-            alert("Failed to encrypt message locally.");
-            return;
-        }
+        // Check if this is the first message to this recipient
+        const stateKey = `teatime_ratchet_state_${currentUser}_${selectedContact}`;
+        const hasRatchetState = !!localStorage.getItem(stateKey);
 
-        // השימוש בתוכן המוצפן שחזר מה-Python
-        const finalEncryptedContent = encryptionResult.encrypted_content; 
-        
-        // ------------------------------------------
+        if (!hasRatchetState) {
+            // FIRST MESSAGE: Perform X3DH initiator flow
+            console.log(`[sendMessage] First message to ${selectedContact}, performing X3DH...`);
+            
+            // Fetch peer's key bundle
+            const keyBundleResp = await fetch(`${API_BASE}/get-key-bundle/${selectedContact}`);
+            if (!keyBundleResp.ok) {
+                alert("Failed to get peer's key bundle");
+                return;
+            }
+            const keyBundle = await keyBundleResp.json();
+            
+            // Get our identity keys from localStorage
+            const ourIdentityPrivate = localStorage.getItem(`teatime_identity_sec_${currentUser}`);
+            const ourIdentityPublic = localStorage.getItem(`teatime_identity_pub_${currentUser}`);
+            
+            if (!ourIdentityPrivate || !ourIdentityPublic) {
+                alert("Your identity keys not found locally!");
+                return;
+            }
 
-        // מכאן הכל נשאר אותו דבר - שליחה לשרת המרכזי
-        const messageData = {
-            sender: currentUser,
-            receiver: selectedContact,
-            encrypted_content: finalEncryptedContent // שולחים את המוצפן, לא את הטקסט הרגיל
-        };
+            // Call X3DH initiator via sidecar
+            const localApiPort = window.EncryptionService.getLocalApiPort();
+            if (!localApiPort) {
+                alert("Local encryption sidecar not available");
+                return;
+            }
 
-        const response = await fetch(`${API_BASE}/send-message`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(messageData)
-        });
+            const x3dhInitiatorResp = await fetch(`http://127.0.0.1:${localApiPort}/do-x3dh-by-initiator`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    self_identity_key_b64: ourIdentityPrivate,
+                    self_identity_key_public_b64: ourIdentityPublic,
+                    peer_identity_key_public_b64: keyBundle.identity_key_public,
+                    peer_prekey_public_b64: keyBundle.prekey_public,
+                    peer_prekey_signature_b64: keyBundle.prekey_signature_public,
+                    peer_onetime_prekey_public_b64: keyBundle.onetime_key_public,
+                    peer_signing_key_public_b64: keyBundle.signing_key_public
+                })
+            });
 
-        if (response.ok) {
-            // ב-UI המקומי אנחנו מציגים את הטקסט המקורי (כדי שהשולח יבין מה הוא כתב)
-            const localMsg = {
+            if (!x3dhInitiatorResp.ok) {
+                // Try to extract detailed error from sidecar response (JSON.detail or raw text)
+                let detailText = '';
+                try {
+                    const txt = await x3dhInitiatorResp.text();
+                    try {
+                        const parsed = JSON.parse(txt);
+                        detailText = parsed.detail || JSON.stringify(parsed);
+                    } catch (e) {
+                        detailText = txt;
+                    }
+                } catch (e) {
+                    detailText = String(e);
+                }
+                console.error('X3DH initiator failed:', detailText);
+                status.textContent = `❌ X3DH initiator failed: ${detailText.substring(0,200)}`;
+                status.classList.add('error');
+                alert('X3DH initiator failed: ' + detailText);
+                return;
+            }
+
+            const x3dhInitiatorResult = await x3dhInitiatorResp.json();
+
+            // Initialize ratchet as sender
+            const sharedSecret = x3dhInitiatorResult.shared_secret_key_b64;
+            const ephemeralPublic = x3dhInitiatorResult.self_ephemeral_key_public_b64;
+            const associatedData = x3dhInitiatorResult.associated_data_b64;
+            
+            // Get peer's prekey private... wait, we need Bob's DH keypair for RatchetInitAlice
+            // Actually, for RatchetInitAlice, we need bob_dh_public_key (the peer's prekey public)
+            const peerPrekeyPublic = keyBundle.prekey_public;
+
+            const initRatchetSuccess = await window.EncryptionService.initRatchet(
+                selectedContact,
+                sharedSecret,
+                peerPrekeyPublic,  // Bob's DH public key for sender initialization
+                "sender"
+            );
+
+            if (!initRatchetSuccess) {
+                alert("Ratchet initialization failed");
+                return;
+            }
+
+            console.log("[sendMessage] Ratchet initialized, proceeding with encryption...");
+
+            // Now encrypt the message with the newly initialized ratchet
+            const encryptionResult = await window.EncryptionService.encrypt(content, selectedContact);
+
+            if (!encryptionResult) {
+                alert("Failed to encrypt message locally.");
+                return;
+            }
+
+            // Save plaintext locally for history display
+            saveSentMessage(encryptionResult.encrypted_content, content);
+
+            // Send with X3DH ephemeral key and associated data (first message only)
+            const messageData = {
                 sender: currentUser,
                 receiver: selectedContact,
-                encrypted_content: content, // ב-UI מציגים רגיל
-                timestamp: new Date().toISOString()
+                encrypted_content: encryptionResult.encrypted_content,
+                header_b64: encryptionResult.header,
+                x3dh_ephemeral_public_b64: ephemeralPublic,
+                x3dh_associated_data_b64: associatedData
             };
-            
-            appendMessage(localMsg);
-            messageInput.value = '';
-            
-            addUserToList(selectedContact);
-            
-            // Reload conversation to get the message with proper server ID
-            await loadConversationFromBackend(selectedContact);
+
+            const response = await fetch(`${API_BASE}/send-message`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(messageData)
+            });
+
+            if (response.ok) {
+                const localMsg = {
+                    sender: currentUser,
+                    receiver: selectedContact,
+                    encrypted_content: content,
+                    timestamp: new Date().toISOString()
+                };
+                
+                await appendMessage(localMsg);
+                messageInput.value = '';
+                addUserToList(selectedContact);
+                await loadConversationFromBackend(selectedContact);
+            } else {
+                const error = await response.json();
+                alert('Failed to send: ' + error.detail);
+            }
+
         } else {
-            const error = await response.json();
-            alert('Failed to send: ' + error.detail);
+            // SUBSEQUENT MESSAGES: Just encrypt with existing ratchet state
+            console.log(`[sendMessage] Subsequent message to ${selectedContact}`);
+
+            const encryptionResult = await window.EncryptionService.encrypt(content, selectedContact);
+
+            if (!encryptionResult) {
+                alert("Failed to encrypt message locally.");
+                return;
+            }
+
+            // Save plaintext locally for history display
+            saveSentMessage(encryptionResult.encrypted_content, content);
+
+            const messageData = {
+                sender: currentUser,
+                receiver: selectedContact,
+                encrypted_content: encryptionResult.encrypted_content,
+                header_b64: encryptionResult.header
+            };
+
+            const response = await fetch(`${API_BASE}/send-message`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(messageData)
+            });
+
+            if (response.ok) {
+                const localMsg = {
+                    sender: currentUser,
+                    receiver: selectedContact,
+                    encrypted_content: content,
+                    timestamp: new Date().toISOString()
+                };
+                
+                await appendMessage(localMsg);
+                messageInput.value = '';
+                addUserToList(selectedContact);
+                await loadConversationFromBackend(selectedContact);
+            } else {
+                const error = await response.json();
+                alert('Failed to send: ' + error.detail);
+            }
         }
+
     } catch (error) {
         console.error('Send error:', error);
     }
@@ -741,12 +1149,34 @@ async function checkForNewMessagesFromOthers() {
             const messages = await response.json();
             console.log(`📬 Got ${messages.length} new messages:`, messages);
             
+            // Set username in encryption service
+            window.EncryptionService.setCurrentUsername(currentUser);
+            
             for (const msg of messages) {
                 console.log(`📩 Processing message from ${msg.sender}: ${msg.encrypted_content}`);
                 
-                // Show notification for ALL new messages
-                console.log(`🔔 Calling showNotification for ${msg.sender}...`);
-                showNotification(msg.sender, msg.encrypted_content);
+                const senderName = msg.sender;
+                
+                // Check if this is a first message (has X3DH ephemeral key)
+                if (msg.x3dh_ephemeral_public_b64) {
+                    const success = await handleReceiverX3DH(senderName, msg.x3dh_ephemeral_public_b64);
+                    if (!success) continue;
+                }
+
+                // Decrypt the message (works for both first and subsequent messages after ratchet init)
+                const decrypted = await window.EncryptionService.decrypt(
+                    msg.header_b64 || "",  // header from the message
+                    msg.encrypted_content,
+                    senderName
+                );
+
+                if (decrypted) {
+                    console.log(`✅ Decrypted message from ${senderName}: ${decrypted}`);
+                    showNotification(senderName, decrypted);
+                } else {
+                    console.log(`⚠️ Could not decrypt message from ${senderName}`);
+                    showNotification(senderName, "[Encrypted message]");
+                }
             }
             
             if (messages.length > 0) {
@@ -761,7 +1191,7 @@ async function checkForNewMessagesFromOthers() {
 }
 
 
-function renderMessages(messages) {
+async function renderMessages(messages) {
     messagesDiv.innerHTML = '';
     
     if (messages.length === 0) {
@@ -775,11 +1205,13 @@ function renderMessages(messages) {
         return;
     }
     
-    messages.forEach(msg => appendMessage(msg, false));
+    for (const msg of messages) {
+        await appendMessage(msg, false);
+    }
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 }
 
-function appendMessage(msg, scroll = true) {
+async function appendMessage(msg, scroll = true) {
     // Remove empty state if present
     const emptyState = messagesDiv.querySelector('.empty-state');
     if (emptyState) emptyState.remove();
@@ -791,9 +1223,47 @@ function appendMessage(msg, scroll = true) {
     const time = new Date(msg.timestamp);
     const timeStr = time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     
+    // By default show the stored content (may be encrypted)
+    let displayText = msg.encrypted_content;
+
+    // If this message is not sent by us, attempt to decrypt using the EncryptionService
+    if (!isSent && window.EncryptionService && typeof window.EncryptionService.decrypt === 'function') {
+        try {
+            // Check if this message carries X3DH initialization data
+            if (msg.x3dh_ephemeral_public_b64) {
+                await handleReceiverX3DH(msg.sender, msg.x3dh_ephemeral_public_b64);
+            }
+
+            // header_b64 may be missing for older messages
+            const header = msg.header_b64 || "";
+            const decrypted = await window.EncryptionService.decrypt(header, msg.encrypted_content, msg.sender);
+            if (decrypted) {
+                // sometimes the service returns a base64-encoded plaintext string; try to decode it if so
+                let decoded = decrypted;
+                try {
+                    // attempt base64 -> UTF8
+                    decoded = decodeURIComponent(escape(atob(decrypted)));
+                    // if successful, use decoded
+                    displayText = decoded;
+                } catch (e) {
+                    // not base64 or decode failed, use raw decrypted
+                    displayText = decrypted;
+                }
+            }
+        } catch (e) {
+            console.error('Error decrypting message for display:', e);
+        }
+    } else if (isSent) {
+        // For sent messages, try to retrieve the plaintext from local storage
+        const storedPlaintext = getSentMessage(msg.encrypted_content);
+        if (storedPlaintext) {
+            displayText = storedPlaintext;
+        }
+    }
+
     div.innerHTML = `
         <div class="sender">${isSent ? 'You' : msg.sender}</div>
-        <div class="text">${escapeHtml(msg.encrypted_content)}</div>
+        <div class="text">${escapeHtml(displayText)}</div>
         <div class="time">${timeStr}</div>
     `;
     messagesDiv.appendChild(div);
