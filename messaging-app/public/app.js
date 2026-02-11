@@ -308,14 +308,44 @@ function connectWebSocket() {
         }, 30000);
     };
     
-    ws.onmessage = (event) => {
+    ws.onmessage = async (event) => {
         try {
             const data = JSON.parse(event.data);
             console.log('📨 WebSocket message received:', data);
             
             if (data.type === 'new_message') {
+                let notificationText = data.encrypted_content;
+
+                // Attempt to decrypt for notification
+                if (window.EncryptionService) {
+                    window.EncryptionService.setCurrentUsername(currentUser);
+                    try {
+                        // Check cache first
+                        const cached = getDecryptedMessage(data.message_id);
+                        if (cached) {
+                            notificationText = cached;
+                        } else {
+                            if (data.x3dh_ephemeral_public_b64) {
+                                await handleReceiverX3DH(data.sender, data.x3dh_ephemeral_public_b64);
+                            }
+                            const decrypted = await window.EncryptionService.decrypt(
+                                data.header_b64 || "",
+                                data.encrypted_content,
+                                data.sender
+                            );
+                            if (decrypted) {
+                                let decoded = decrypted;
+                                try { decoded = decodeURIComponent(escape(atob(decrypted))); } 
+                                catch (e) { decoded = decrypted; }
+                                notificationText = decoded;
+                                saveDecryptedMessage(data.message_id, notificationText);
+                            }
+                        }
+                    } catch (e) { console.error('WS Decrypt error:', e); }
+                }
+
                 // Show popup notification
-                showNotification(data.sender, data.encrypted_content);
+                showNotification(data.sender, notificationText);
                 
                 // If we're currently viewing the conversation with this sender, refresh it
                 if (selectedContact === data.sender) {
@@ -391,6 +421,39 @@ function getSentMessage(encryptedContent) {
         if (stored) {
             const map = JSON.parse(stored);
             return map[encryptedContent];
+        }
+    } catch (e) {
+        return null;
+    }
+    return null;
+}
+
+// Helper: Save decrypted received message plaintext locally
+function saveDecryptedMessage(messageId, plaintext) {
+    if (!messageId) return;
+    try {
+        const key = `teatime_decrypted_map_${currentUser}`;
+        let map = {};
+        const stored = localStorage.getItem(key);
+        if (stored) {
+            map = JSON.parse(stored);
+        }
+        map[messageId] = plaintext;
+        localStorage.setItem(key, JSON.stringify(map));
+    } catch (e) {
+        console.error("Failed to save decrypted message:", e);
+    }
+}
+
+// Helper: Get decrypted received message plaintext
+function getDecryptedMessage(messageId) {
+    if (!messageId) return null;
+    try {
+        const key = `teatime_decrypted_map_${currentUser}`;
+        const stored = localStorage.getItem(key);
+        if (stored) {
+            const map = JSON.parse(stored);
+            return map[messageId];
         }
     } catch (e) {
         return null;
@@ -787,94 +850,6 @@ function getSentMessage(encryptedContent) {
     return null;
 }
 
-// Helper: Handle X3DH Receiver Flow
-async function handleReceiverX3DH(senderName, ephemeralKey) {
-    try {
-        // Check if we already have a state for this user to avoid re-consuming keys
-        const stateKey = `teatime_ratchet_state_${currentUser}_${senderName}`;
-        if (localStorage.getItem(stateKey)) {
-            return true; // Already initialized
-        }
-
-        console.log(`[X3DH] Attempting to initialize receiver session for ${senderName}...`);
-
-        // Get our stored keys
-        const ourIdentityPrivate = localStorage.getItem(`teatime_identity_sec_${currentUser}`);
-        const ourPrekeyPrivate = localStorage.getItem(`teatime_prekey_priv_${currentUser}`);
-        
-        // Consume one one-time private key (FIFO)
-        let ourOnetimePrivate = "";
-        const otkJson = localStorage.getItem(`teatime_onetime_privs_${currentUser}`);
-        if (otkJson) {
-            try {
-                const otkArr = JSON.parse(otkJson);
-                if (Array.isArray(otkArr) && otkArr.length > 0) {
-                    ourOnetimePrivate = otkArr.shift();
-                    localStorage.setItem(`teatime_onetime_privs_${currentUser}`, JSON.stringify(otkArr));
-                }
-            } catch (e) {
-                console.error('Failed to parse one-time privs:', e);
-            }
-        }
-
-        if (!ourIdentityPrivate || !ourPrekeyPrivate) {
-            console.error("Missing our keys for X3DH receiver");
-            return false;
-        }
-
-        // Get sender's identity key from key bundle
-        const senderKeyBundleResp = await fetch(`${API_BASE}/get-key-bundle/${senderName}`);
-        if (!senderKeyBundleResp.ok) {
-            console.error(`Failed to get ${senderName}'s key bundle`);
-            return false;
-        }
-        const senderKeyBundle = await senderKeyBundleResp.json();
-
-        // Call X3DH receiver via sidecar
-        const localApiPort = window.EncryptionService.getLocalApiPort();
-        if (!localApiPort) {
-            console.error("Local API port not available");
-            return false;
-        }
-
-        const x3dhReceiverResp = await fetch(`http://127.0.0.1:${localApiPort}/do-x3dh-by-receiver`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                self_identity_key_private_b64: ourIdentityPrivate,
-                self_prekey_private_b64: ourPrekeyPrivate,
-                self_onetime_key_private_b64: ourOnetimePrivate || "",
-                peer_identity_key_public_b64: senderKeyBundle.identity_key_public,
-                peer_ephemeral_key_public_b64: ephemeralKey
-            })
-        });
-
-        if (!x3dhReceiverResp.ok) {
-            console.error('X3DH receiver failed sidecar call');
-            return false;
-        }
-
-        const x3dhReceiverResult = await x3dhReceiverResp.json();
-        const sharedSecret = x3dhReceiverResult.shared_secret_key_b64;
-
-        // Initialize ratchet as receiver
-        const initRatchetSuccess = await window.EncryptionService.initRatchet(
-            senderName,
-            sharedSecret,
-            ourPrekeyPrivate,
-            "receiver"
-        );
-
-        if (initRatchetSuccess) {
-            console.log(`[X3DH] Successfully initialized session with ${senderName}`);
-            return true;
-        }
-    } catch (e) {
-        console.error("[X3DH] Error in handleReceiverX3DH:", e);
-    }
-    return false;
-}
-
 // Load conversation from backend
 async function loadConversationFromBackend(contact) {
     // Ensure username is set in encryption service before rendering/decrypting
@@ -1155,6 +1130,12 @@ async function checkForNewMessagesFromOthers() {
             for (const msg of messages) {
                 console.log(`📩 Processing message from ${msg.sender}: ${msg.encrypted_content}`);
                 
+                // Check cache to avoid double decryption/notification
+                const cached = getDecryptedMessage(msg.id);
+                if (cached) {
+                    continue;
+                }
+
                 const senderName = msg.sender;
                 
                 // Check if this is a first message (has X3DH ephemeral key)
@@ -1172,6 +1153,7 @@ async function checkForNewMessagesFromOthers() {
 
                 if (decrypted) {
                     console.log(`✅ Decrypted message from ${senderName}: ${decrypted}`);
+                    saveDecryptedMessage(msg.id, decrypted);
                     showNotification(senderName, decrypted);
                 } else {
                     console.log(`⚠️ Could not decrypt message from ${senderName}`);
@@ -1227,7 +1209,11 @@ async function appendMessage(msg, scroll = true) {
     let displayText = msg.encrypted_content;
 
     // If this message is not sent by us, attempt to decrypt using the EncryptionService
-    if (!isSent && window.EncryptionService && typeof window.EncryptionService.decrypt === 'function') {
+    if (!isSent) {
+        const cached = getDecryptedMessage(msg.id);
+        if (cached) {
+            displayText = cached;
+        } else if (window.EncryptionService && typeof window.EncryptionService.decrypt === 'function') {
         try {
             // Check if this message carries X3DH initialization data
             if (msg.x3dh_ephemeral_public_b64) {
@@ -1249,9 +1235,11 @@ async function appendMessage(msg, scroll = true) {
                     // not base64 or decode failed, use raw decrypted
                     displayText = decrypted;
                 }
+                saveDecryptedMessage(msg.id, displayText);
             }
         } catch (e) {
             console.error('Error decrypting message for display:', e);
+        }
         }
     } else if (isSent) {
         // For sent messages, try to retrieve the plaintext from local storage
