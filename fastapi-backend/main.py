@@ -1,17 +1,17 @@
+import base64
+import os
+from contextlib import asynccontextmanager
+from datetime import datetime
+from typing import List, Dict
+
+from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from nacl.public import PublicKey, SealedBox
+from pydantic import BaseModel
 from sqlalchemy import create_engine, Column, String, Integer, Boolean, DateTime, ForeignKey, or_, and_
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
-from pydantic import BaseModel
-from datetime import datetime
-from typing import List, Dict
-from contextlib import asynccontextmanager
-from apscheduler.schedulers.background import BackgroundScheduler
-import json
-import base64
-import os
-from nacl.public import PublicKey, SealedBox
 
 # --- Database Setup ---
 SQLALCHEMY_DATABASE_URL = "sqlite:///./teatime_backend.db"
