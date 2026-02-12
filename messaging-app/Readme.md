@@ -1,18 +1,20 @@
 # 📱 TeeTime Messenger - Desktop App
 
-The desktop frontend for **TeeTime**, built with **Electron**. This app provides the interface for end-to-end encrypted messaging, communicating directly with the TeeTime FastAPI backend.
+The desktop frontend for **TeeTime**, built with **Electron**. This app provides the interface for end-to-end encrypted messaging, communicating directly with the TeeTime FastAPI backend and a local Python sidecar for cryptographic operations.
 
 ## 🚀 Features
 * **Desktop Interface:** Native Windows/Mac/Linux experience.
-* **E2EE Integration:** Handles local key generation and message encryption/decryption.
-* **Real-time Updates:** Connects to the backend to fetch new messages.
+* **E2EE Integration:** All crypto operations (key generation, X3DH, Double Ratchet, SealedBox decryption) are offloaded to a trusted local sidecar service.
+* **Real-time Updates:** WebSocket + polling for new messages and notifications.
+* **Secure Key Management:** Private keys remain local; sidecar is the only trusted crypto service.
 
 ---
 
 ## 🛠️ Setup Instructions
 
 ### 1. Prerequisites
-Ensure you have **Node.js** (LTS version recommended) installed on your machine. You can check by running `node -v` in your terminal.
+- **Node.js** (LTS version recommended) — check with `node -v`
+- **Python 3.8+** (required for the local crypto sidecar) — check with `python --version`
 
 ### 2. Installation
 Navigate to the app directory and install the necessary dependencies:

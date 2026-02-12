@@ -3,6 +3,8 @@ import json
 from dataclasses import dataclass
 
 import xeddsa.bindings
+from nacl.signing import SigningKey, VerifyKey
+from nacl.exceptions import BadSignatureError
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -32,6 +34,9 @@ def kdf(secret_key_material: bytes) -> bytes:
 class IdentityKeyPair:
     identity_key_private: X25519PrivateKey
     identity_key_public: X25519PublicKey
+    # Ed25519 signing keypair bytes (private and public) for signing prekeys
+    signing_key_private_bytes: bytes | None = None
+    signing_key_public_bytes: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -45,9 +50,16 @@ def create_identity_key() -> IdentityKeyPair:
     identity_key_private = CURVE.generate()
     identity_key_public = identity_key_private.public_key()
 
+    # Generate Ed25519 signing keypair (for prekey signing)
+    signing_key = SigningKey.generate()
+    signing_priv_bytes = signing_key.encode()
+    signing_pub_bytes = signing_key.verify_key.encode()
+
     identity_key = IdentityKeyPair(
         identity_key_private=identity_key_private,
         identity_key_public=identity_key_public,
+        signing_key_private_bytes=signing_priv_bytes,
+        signing_key_public_bytes=signing_pub_bytes,
     )
 
     return identity_key
@@ -57,8 +69,12 @@ def create_new_prekey(identity_key: IdentityKeyPair) -> PreKeyPair:
     prekey_private = CURVE.generate()
     prekey_public = prekey_private.public_key()
 
-    prekey_signature = xeddsa.bindings.ed25519_priv_sign(priv=identity_key.identity_key_private.private_bytes_raw(),
-                                                         msg=prekey_public.public_bytes_raw())
+    # Sign the prekey public bytes with the identity's Ed25519 signing private key
+    if identity_key.signing_key_private_bytes is None:
+        raise ValueError("missing signing private key for identity")
+    signing_key = SigningKey(identity_key.signing_key_private_bytes)
+    sig = signing_key.sign(prekey_public.public_bytes_raw()).signature
+    prekey_signature = sig
 
     prekey = PreKeyPair(
         prekey_private=prekey_private,
@@ -105,22 +121,36 @@ class X3DHInitiatorResult:
 
 
 def x3dh_by_initiator(
-        self_identity_key: X25519PrivateKey,
-        self_identity_key_public: X25519PublicKey,
-        peer_identity_key_public: X25519PublicKey,
-        peer_prekey_public: X25519PublicKey,
-        peer_prekey_signature: bytes,
-        peer_onetime_prekey_public: X25519PublicKey,
+    self_identity_key: X25519PrivateKey,
+    self_identity_key_public: X25519PublicKey,
+    peer_identity_key_public: X25519PublicKey,
+    peer_prekey_public: X25519PublicKey,
+    peer_prekey_signature: bytes,
+    peer_onetime_prekey_public: X25519PublicKey,
+    peer_signing_public_bytes: bytes,
 ) -> X3DHInitiatorResult:
     ephemeral_private_key = CURVE.generate()
     ephemeral_public_key = ephemeral_private_key.public_key()
 
-    verification_successful = xeddsa.bindings.ed25519_verify(sig=peer_prekey_signature,
-                                                             ed25519_pub=peer_identity_key_public.public_bytes_raw(),
-                                                             msg=peer_prekey_public.public_bytes_raw())
+    # Verify signature using provided Ed25519 signing public key (passed as peer_identity_key_public's raw bytes?)
+    # Note: the backend should provide the Ed25519 signing public separately; here we expect
+    # the caller to pass the Ed25519 public bytes in place of peer_identity_key_public if available.
+    try:
+        verify_key = VerifyKey(peer_signing_public_bytes)
+        # raises BadSignatureError on failure
+        verify_key.verify(peer_prekey_public.public_bytes_raw(), peer_prekey_signature)
+        verification_successful = True
+    except BadSignatureError:
+        verification_successful = False
+    except Exception:
+        verification_successful = False
 
     if not verification_successful:
-        raise ValueError("verification failed")
+        # Provide more context for debugging: include base64-encoded signature and public keys
+        sig_b64 = base64.b64encode(peer_prekey_signature).decode()
+        id_pub_b64 = base64.b64encode(peer_identity_key_public.public_bytes_raw()).decode()
+        prekey_pub_b64 = base64.b64encode(peer_prekey_public.public_bytes_raw()).decode()
+        raise ValueError(f"verification failed; sig_b64={sig_b64}; id_pub_b64={id_pub_b64}; prekey_pub_b64={prekey_pub_b64}")
 
     dh1 = self_identity_key.exchange(peer_prekey_public)
     dh2 = ephemeral_private_key.exchange(peer_identity_key_public)
