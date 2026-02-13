@@ -55,7 +55,7 @@ def KDF_CK(ck) -> (bytes, bytes):
     chain_key_hmac.update(CHAIN_KEY_CONST)
     chain_key = chain_key_hmac.finalize()
 
-    return message_key, chain_key
+    return chain_key, message_key
 
 
 def ENCRYPT(mk, plaintext, associated_data):

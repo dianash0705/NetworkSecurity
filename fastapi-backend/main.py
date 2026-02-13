@@ -54,7 +54,7 @@ class Message(Base):
     is_delivered = Column(Boolean, default=False)
     x3dh_ephemeral_public_b64 = Column(String, nullable=True)  # Optional: ephemeral key from X3DH (first message only)
     x3dh_associated_data_b64 = Column(String, nullable=True)  # Optional: associated data from X3DH (first message only)
-    one_time_public_b64 = Column(String, nullable=True)
+    one_time_key_public_b64 = Column(String, nullable=True)
 
 
 Base.metadata.create_all(bind=engine)
@@ -104,11 +104,10 @@ class MessageSend(BaseModel):
     sender: str
     receiver: str
     encrypted_content: str
-    header_b64: str = None  # Double Ratchet header (needed for decryption)
-    x3dh_ephemeral_public_b64: str = None  # Optional: ephemeral key (first message only)
-    x3dh_associated_data_b64: str = None  # Optional: associated data (first message only)
-    one_time_key_public_v64: str = None  # has value ONLY on first message
-
+    header_b64: str
+    x3dh_ephemeral_public_b64: str | None = None  # Optional: ephemeral key (first message only)
+    x3dh_associated_data_b64: str | None = None  # Optional: associated data (first message only)
+    one_time_key_public_b64: str | None = None  # has value ONLY on first message
 
 # New Schemas for Admin Views
 class UserOut(BaseModel):
@@ -570,8 +569,9 @@ async def send_message(msg: MessageSend, db: Session = Depends(get_db)):
         header_b64=msg.header_b64,
         x3dh_ephemeral_public_b64=msg.x3dh_ephemeral_public_b64,
         x3dh_associated_data_b64=msg.x3dh_associated_data_b64,
-        one_time_public_b64 = msg.one_time_public_b64,
+        one_time_key_public_b64 = msg.one_time_key_public_b64,
     )
+
     db.add(new_msg)
     db.commit()
     db.refresh(new_msg)
@@ -585,7 +585,8 @@ async def send_message(msg: MessageSend, db: Session = Depends(get_db)):
         "x3dh_ephemeral_public_b64": msg.x3dh_ephemeral_public_b64,
         "x3dh_associated_data_b64": msg.x3dh_associated_data_b64,
         "timestamp": new_msg.timestamp.isoformat(),
-        "message_id": new_msg.id
+        "message_id": new_msg.id,
+        "one_time_key_public_b64": msg.one_time_key_public_b64,
     })
 
     return {"status": "Message queued for delivery"}
