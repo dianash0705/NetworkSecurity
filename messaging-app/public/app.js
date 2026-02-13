@@ -279,6 +279,7 @@ function connectWebSocket() {
                                 data.sender
                             );
                             if (decrypted) {
+                                notificationText=decrypted;
                                 saveDecryptedMessage(data.message_id, decrypted);
                             } else {
                                 console.log(`⚠️ Could not decrypt message from ${data.sender}`);
