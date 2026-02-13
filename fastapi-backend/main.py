@@ -10,7 +10,6 @@ from sqlalchemy import create_engine, Column, String, Integer, Boolean, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 
-
 # --- Database Setup ---
 SQLALCHEMY_DATABASE_URL = "sqlite:///./teatime_backend.db"
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
@@ -25,7 +24,6 @@ class User(Base):
     identity_key_public = Column(String, nullable=False)
     prekey_public = Column(String, nullable=False)
     prekey_signature_public = Column(String, nullable=False)
-    signing_key_public = Column(String, nullable=True)
     prekey_needs_update = Column(Boolean, default=False)  # Flag to signal client to update prekeys
 
 
@@ -56,6 +54,7 @@ class Message(Base):
     is_delivered = Column(Boolean, default=False)
     x3dh_ephemeral_public_b64 = Column(String, nullable=True)  # Optional: ephemeral key from X3DH (first message only)
     x3dh_associated_data_b64 = Column(String, nullable=True)  # Optional: associated data from X3DH (first message only)
+    one_time_public_b64 = Column(String, nullable=True)
 
 
 Base.metadata.create_all(bind=engine)
@@ -73,7 +72,6 @@ class UserRegister(BaseModel):
     identity_key_public: str
     prekey_public: str
     prekey_signature_public: str
-    signing_key_public: str | None = None
     onetime_keys_public: List[str]  # Client should send ~10 onetime public keys
 
 
@@ -109,6 +107,7 @@ class MessageSend(BaseModel):
     header_b64: str = None  # Double Ratchet header (needed for decryption)
     x3dh_ephemeral_public_b64: str = None  # Optional: ephemeral key (first message only)
     x3dh_associated_data_b64: str = None  # Optional: associated data (first message only)
+    one_time_key_public_v64: str = None  # has value ONLY on first message
 
 
 # New Schemas for Admin Views
@@ -311,7 +310,6 @@ def register(user: UserRegister, db: Session = Depends(get_db)):
         identity_key_public=user.identity_key_public,
         prekey_public=user.prekey_public,
         prekey_signature_public=user.prekey_signature_public,
-        signing_key_public=user.signing_key_public
     )
     db.add(db_user)
 
@@ -380,39 +378,17 @@ def check_prekey_status(username: str, db: Session = Depends(get_db)):
     }
 
 
-@app.get("/get-key-bundle/{username}", tags=["User Actions"])
-def get_key_bundle(username: str, db: Session = Depends(get_db)):
-    """
-    Get the full X3DH key bundle for a user (used to initiate a session).
-    This consumes one onetime key from the user's pool.
-    """
+@app.get("/get-user-public-keys/{username}", tags=["User Actions"])
+def get_user_public_keys(username: str, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-
-    # Get an unused onetime key
-    onetime_key_record = db.query(OneTimeKey).filter(
-        OneTimeKey.username == username,
-        OneTimeKey.is_used == False
-    ).first()
-
-    onetime_key_public_value = None
-    if onetime_key_record:
-        onetime_key_public_value = onetime_key_record.onetime_key_public
-        onetime_key_record.is_used = True
-        db.commit()
-
-    # Check remaining onetime keys and warn if low
-    keys_status = get_onetime_keys_status(username, db)
 
     return {
         "username": username,
         "identity_key_public": user.identity_key_public,
         "prekey_public": user.prekey_public,
         "prekey_signature_public": user.prekey_signature_public,
-        "signing_key_public": user.signing_key_public,
-        "onetime_key_public": onetime_key_public_value,
-        **keys_status
     }
 
 
@@ -584,7 +560,8 @@ async def send_message(msg: MessageSend, db: Session = Depends(get_db)):
         encrypted_content=msg.encrypted_content,
         header_b64=msg.header_b64,
         x3dh_ephemeral_public_b64=msg.x3dh_ephemeral_public_b64,
-        x3dh_associated_data_b64=msg.x3dh_associated_data_b64
+        x3dh_associated_data_b64=msg.x3dh_associated_data_b64,
+        one_time_public_b64 = msg.one_time_public_b64,
     )
     db.add(new_msg)
     db.commit()
