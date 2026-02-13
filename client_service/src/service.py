@@ -85,7 +85,7 @@ class DecryptRequest(BaseModel):
 class DecryptResponse(BaseModel):
     success: bool
     state_b64: str
-    plaintext: str
+    plaintext_b64: str
 
 
 # Decrypts a ciphertext message using the current Double Ratchet session state.
@@ -107,10 +107,12 @@ def decrypt_message(decrypt_request: DecryptRequest) -> DecryptResponse:
         state_b64 = base64.b64encode(
             json.dumps(double_ratchet_impl.double_ratchet_state_to_dict(state)).encode()).decode()
 
+        plaintext_b64 = base64.b64encode(plaintext).decode()
+
         response = DecryptResponse(
             success=True,
             state_b64=state_b64,
-            plaintext=plaintext
+            plaintext_b64=plaintext_b64
         )
 
         return response

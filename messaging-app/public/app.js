@@ -279,11 +279,9 @@ function connectWebSocket() {
                                 data.sender
                             );
                             if (decrypted) {
-                                let decoded = decrypted;
-                                try { decoded = decodeURIComponent(escape(atob(decrypted))); } 
-                                catch (e) { decoded = decrypted; }
-                                notificationText = decoded;
-                                saveDecryptedMessage(data.message_id, notificationText);
+                                saveDecryptedMessage(data.message_id, decrypted);
+                            } else {
+                                console.log(`⚠️ Could not decrypt message from ${data.sender}`);
                             }
                         }
                     } catch (e) { console.error('WS Decrypt error:', e); }
@@ -1368,30 +1366,21 @@ async function appendMessage(msg, scroll = true) {
         if (cached) {
             displayText = cached;
         } else if (window.EncryptionService && typeof window.EncryptionService.decrypt === 'function') {
-        try {
-            // Check if this message carries X3DH initialization data
-            if (msg.x3dh_ephemeral_public_b64) {
-                await handleReceiverX3DH(msg.sender, msg.x3dh_ephemeral_public_b64, msg.one_time_key_public_b64);
-            }
-
-            const decrypted = await window.EncryptionService.decrypt(msg.header_b64, msg.encrypted_content, msg.sender);
-            if (decrypted) {
-                // sometimes the service returns a base64-encoded plaintext string; try to decode it if so
-                let decoded = decrypted;
-                try {
-                    // attempt base64 -> UTF8
-                    decoded = decodeURIComponent(escape(atob(decrypted)));
-                    // if successful, use decoded
-                    displayText = decoded;
-                } catch (e) {
-                    // not base64 or decode failed, use raw decrypted
-                    displayText = decrypted;
+            try {
+                // Check if this message carries X3DH initialization data
+                if (msg.x3dh_ephemeral_public_b64) {
+                    await handleReceiverX3DH(msg.sender, msg.x3dh_ephemeral_public_b64);
                 }
-                saveDecryptedMessage(msg.id, displayText);
+
+                const decrypted = await window.EncryptionService.decrypt(msg.header_b64, msg.encrypted_content, msg.sender);
+                if (decrypted) {
+                    saveDecryptedMessage(msg.id, decrypted);
+                } else {
+                    console.log(`⚠️ Could not decrypt message from ${msg.sender}`);
+                }
+            } catch (e) {
+                console.error('Error decrypting message for display:', e);
             }
-        } catch (e) {
-            console.error('Error decrypting message for display:', e);
-        }
         }
     } else if (isSent) {
         // For sent messages, try to retrieve the plaintext from local storage

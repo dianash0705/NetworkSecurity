@@ -56,18 +56,7 @@ window.EncryptionService = {
     },
 
     getLocalApiPort: () => localApiPort,
-    // initRatchet: async (recipientId, sharedSecretB64, keyDataB64, role) => {
-    //     /**
-    //      * Initialize a new ratchet session for a conversation.
-    //      * role: "sender" or "receiver"
-    //      * Returns: true on success, false on failure
-    //      */
-    //     if (!localApiPort) {
-    //         console.error("Encryption service not ready yet");
-    //         return false;
-    //     }
 
-    // initSenderRatchet: async (recipientId, sharedSecretB64, peerDhPublicKeyB64, role) => {
     initSenderRatchet: async (recipientId, shared_serret_b64, peer_dh_public_key_b64) => {
         if (!localApiPort) {
             console.error("Encryption service not ready yet");
@@ -132,33 +121,6 @@ window.EncryptionService = {
             return false;
         }
     },
-
-    // initReceiverRatchet: async (recipientId, sharedSecretB64, selfDhPrivateKeyB64, selfDhPublicKeyB64, role) => {
-    //     if (!localApiPort) return false;
-
-    //     try {
-    //         const response = await fetch(`http://127.0.0.1:${localApiPort}/init-receiver-double-ratchet`, {
-    //             method: 'POST',
-    //             headers: { 'Content-Type': 'application/json' },
-    //             body: JSON.stringify({
-    //                 shared_secret_b64: sharedSecretB64,
-    //                 self_dh_public_key_b64: selfDhPublicKeyB64,
-    //                 self_dh_private_key_b64: selfDhPrivateKeyB64
-    //             })
-    //         });
-
-    //         if (!response.ok) return false;
-    //         const data = await response.json();
-    //         if (data.success) {
-    //             saveRatchetState(currentUsername, recipientId, data.state_b64);
-    //             return true;
-    //         }
-    //         return false;
-    //     } catch (error) {
-    //         console.error("[initReceiverRatchet] Error:", error);
-    //         return false;
-    //     }
-    // },
 
     encrypt: async (text, recipientId) => {
         if (!localApiPort) {
@@ -283,7 +245,7 @@ window.EncryptionService = {
             if (data.success) {
                 // Update state after decryption
                 saveRatchetState(currentUsername, recipientId, data.state_b64);
-                return data.plaintext;
+                return fromBase64(data.plaintext_b64);
             } else {
                 console.error("[decrypt] Server returned success: false");
                 return null;
