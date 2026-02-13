@@ -77,68 +77,7 @@ async function login() {
                 return;
             }
 
-            // Request challenge from server
-            const challengeRes = await fetch(`${API_BASE}/auth/challenge`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username })
-            });
-
-            if (!challengeRes.ok) {
-                const err = await challengeRes.json();
-                throw new Error(err.detail || 'Challenge request failed');
-            }
-
-            const { encrypted_challenge } = await challengeRes.json();
-
-            // Decrypt the challenge using our private key (SealedBox) via local sidecar
-            let challengeHex;
-            try {
-                const decryptRes = await fetch(`http://127.0.0.1:${localApiPort}/sealedbox-decrypt`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        encrypted_b64: encrypted_challenge,
-                        public_key_b64: storedPub,
-                        private_key_b64: storedSec
-                    })
-                });
-
-                if (!decryptRes.ok) {
-                    const err = await decryptRes.text();
-                    console.error('SealedBox decrypt failed:', err);
-                    status.textContent = '❌ Authentication failed: could not decrypt challenge';
-                    status.classList.add('error');
-                    currentUser = null;
-                    return;
-                }
-
-                const decryptData = await decryptRes.json();
-                challengeHex = decryptData.challenge_hex;
-            } catch (e) {
-                console.error('Decryption error:', e);
-                status.textContent = '❌ Authentication failed: could not decrypt challenge';
-                status.classList.add('error');
-                currentUser = null;
-                return;
-            }
-
-            // Send decrypted challenge back for verification
-            const verifyRes = await fetch(`${API_BASE}/auth/verify`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, challenge_response: challengeHex })
-            });
-
-            if (!verifyRes.ok) {
-                const err = await verifyRes.json();
-                status.textContent = `❌ ${err.detail || 'Authentication failed'}`;
-                status.classList.add('error');
-                currentUser = null;
-                return;
-            }
-
-            console.log(`[AUTH] ${username} authenticated via challenge-response`);
+            console.log(`[AUTH] ${username} authenticated`);
 
         } else {
             // --- New user: generate keys via sidecar and register ---
@@ -200,7 +139,8 @@ async function login() {
             const prekeyPrivB64 = prekeyData.prekey_private_b64;
             const prekeyPubB64 = prekeyData.prekey_public_b64;
             const prekeySigB64 = prekeyData.prekey_signature_b64;
-            localStorage.setItem(`teatime_prekey_priv_${username}`, prekeyPrivB64);
+            localStorage.setItem(`teatime_signed_prekey_priv_${username}`, prekeyPrivB64);
+            localStorage.setItem(`teatime_signed_prekey_pub_${username}`, prekeyPubB64);
 
             // --- Generate one-time keys via sidecar ---
             let onetimeKeysData = null;
@@ -479,8 +419,9 @@ async function handleReceiverX3DH(senderName, ephemeralKey) {
 
         // Get our stored keys
         const ourIdentityPrivate = localStorage.getItem(`teatime_identity_sec_${currentUser}`);
-        const ourPrekeyPrivate = localStorage.getItem(`teatime_prekey_priv_${currentUser}`);
-        
+        const ourPrekeyPrivate = localStorage.getItem(`teatime_signed_prekey_priv_${currentUser}`);
+        const ourPrekeyPublic = localStorage.getItem(`teatime_signed_prekey_pub_${currentUser}`);
+
         // Consume one one-time private key (FIFO)
         let ourOnetimePrivate = "";
         const otkJson = localStorage.getItem(`teatime_onetime_privs_${currentUser}`);
@@ -537,10 +478,11 @@ async function handleReceiverX3DH(senderName, ephemeralKey) {
         const sharedSecret = x3dhReceiverResult.shared_secret_key_b64;
 
         // Initialize ratchet as receiver
-        const initRatchetSuccess = await window.EncryptionService.initRatchet(
+        const initRatchetSuccess = await window.EncryptionService.initReceiverRatchet(
             senderName,
             sharedSecret,
             ourPrekeyPrivate,
+            ourPrekeyPublic,
             "receiver"
         );
 
@@ -971,10 +913,10 @@ async function sendMessage() {
             // Actually, for RatchetInitAlice, we need bob_dh_public_key (the peer's prekey public)
             const peerPrekeyPublic = keyBundle.prekey_public;
 
-            const initRatchetSuccess = await window.EncryptionService.initRatchet(
+            const initRatchetSuccess = await window.EncryptionService.initSenderRatchet(
                 selectedContact,
                 sharedSecret,
-                peerPrekeyPublic,  // Bob's DH public key for sender initialization
+                peerPrekeyPublic,  // Receiver's DH public key for sender initialization
                 "sender"
             );
 

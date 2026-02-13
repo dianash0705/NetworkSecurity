@@ -56,46 +56,135 @@ window.EncryptionService = {
     },
 
     getLocalApiPort: () => localApiPort,
+    // initRatchet: async (recipientId, sharedSecretB64, keyDataB64, role) => {
+    //     /**
+    //      * Initialize a new ratchet session for a conversation.
+    //      * role: "sender" or "receiver"
+    //      * Returns: true on success, false on failure
+    //      */
+    //     if (!localApiPort) {
+    //         console.error("Encryption service not ready yet");
+    //         return false;
+    //     }
 
-    initRatchet: async (recipientId, sharedSecretB64, bobDhPublicKeyB64, role) => {
-        /**
-         * Initialize a new ratchet session for a conversation.
-         * role: "sender" or "receiver"
-         * Returns: true on success, false on failure
-         */
+    //     try {
+    //         const response;
+    //         if (role === 'sender') {
+    //             response = await fetch(`http://127.0.0.1:${localApiPort}/init-sender-double-ratchet`, {
+    //                 method: 'POST',
+    //                 headers: { 'Content-Type': 'application/json' },
+    //                 body: JSON.stringify({
+    //                     shared_secret_b64: sharedSecretB64,
+    //                     peer_dh_public_key_b64: keyDataB64,
+    //                     role: role
+    //                 })
+    //         }
+    //         const response = await fetch(`http://127.0.0.1:${localApiPort}/init-ratchet`, {
+    //             let endpoint;
+    //             let bodyData;
+
+    //                 endpoint = `http://127.0.0.1:${localApiPort}/init-sender-double-ratchet`;
+    //                 bodyData = {
+    //                     shared_secret_b64: sharedSecretB64,
+    //                     peer_dh_public_key_b64: keyDataB64
+    //                 };
+    //             } else if (role === 'receiver') {
+    //                 endpoint = `http://127.0.0.1:${localApiPort}/init-receiver-double-ratchet`;
+    //                 bodyData = {
+    //                     shared_secret_b64: sharedSecretB64,
+    //                     self_dh_public_key_b64: keyDataB64,
+    //                     self_dh_private_key_b64: 
+    //                 };
+    //         } else {
+    //             console.error(`[initRatchet] Invalid role: ${role}`);
+    //             return false;
+    //         }
+
+    //         const response = await fetch(endpoint, {
+    //             method: 'POST',
+    //             headers: { 'Content-Type': 'application/json' },
+    //             body: JSON.stringify({
+    //                 shared_secret_b64: sharedSecretB64,
+    //                 bob_dh_public_key_b64: bobDhPublicKeyB64,
+    //                 role: role
+    //             })
+    //             body: JSON.stringify(bodyData)
+    //         });
+
+    //         if (!response.ok) {
+    //             const errorText = await response.text();
+    //             console.error(`[initRatchet] Failed (Status ${response.status}):`, errorText);
+    //             return false;
+    //         }
+
+    //         const data = await response.json();
+    //         if (data.success) {
+    //             saveRatchetState(currentUsername, recipientId, data.state_b64);
+    //             console.log(`[initRatchet] Initialized ratchet state for ${recipientId} (role: ${role})`);
+    //             return true;
+    //         } else {
+    //             console.error("[initRatchet] Server returned success: false");
+    //             return false;
+    //         }
+    //     } catch (error) {
+    //         console.error("[initRatchet] Error:", error);
+    //         return false;
+    //     }
+    // },
+
+    initSenderRatchet: async (recipientId, sharedSecretB64, peerDhPublicKeyB64, role) => {
         if (!localApiPort) {
             console.error("Encryption service not ready yet");
             return false;
         }
 
         try {
-            const response = await fetch(`http://127.0.0.1:${localApiPort}/init-ratchet`, {
+            const response = await fetch(`http://127.0.0.1:${localApiPort}/init-sender-double-ratchet`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     shared_secret_b64: sharedSecretB64,
-                    bob_dh_public_key_b64: bobDhPublicKeyB64,
-                    role: role
+                    peer_dh_public_key_b64: peerDhPublicKeyB64
                 })
             });
 
-            if (!response.ok) {
-                const errorText = await response.text();
-                console.error(`[initRatchet] Failed (Status ${response.status}):`, errorText);
-                return false;
-            }
+            if (!response.ok) return false;
 
             const data = await response.json();
             if (data.success) {
                 saveRatchetState(currentUsername, recipientId, data.state_b64);
-                console.log(`[initRatchet] Initialized ratchet state for ${recipientId} (role: ${role})`);
                 return true;
-            } else {
-                console.error("[initRatchet] Server returned success: false");
-                return false;
             }
+            return false;
         } catch (error) {
-            console.error("[initRatchet] Error:", error);
+            console.error("[initSenderRatchet] Error:", error);
+            return false;
+        }
+    },
+
+    initReceiverRatchet: async (recipientId, sharedSecretB64, selfDhPrivateKeyB64, selfDhPublicKeyB64, role) => {
+        if (!localApiPort) return false;
+
+        try {
+            const response = await fetch(`http://127.0.0.1:${localApiPort}/init-receiver-double-ratchet`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    shared_secret_b64: sharedSecretB64,
+                    self_dh_public_key_b64: selfDhPublicKeyB64,
+                    self_dh_private_key_b64: selfDhPrivateKeyB64
+                })
+            });
+
+            if (!response.ok) return false;
+            const data = await response.json();
+            if (data.success) {
+                saveRatchetState(currentUsername, recipientId, data.state_b64);
+                return true;
+            }
+            return false;
+        } catch (error) {
+            console.error("[initReceiverRatchet] Error:", error);
             return false;
         }
     },
