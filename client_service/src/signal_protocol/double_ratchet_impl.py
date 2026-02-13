@@ -5,8 +5,8 @@ from dataclasses import dataclass
 
 from cryptography.hazmat.primitives import hashes, hmac, padding
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 AES_BLOCKSIZE_BITS = 128
 
@@ -23,8 +23,8 @@ def GENERATE_DH() -> DHKeyPair:
     return DHKeyPair(sk, vk)
 
 
-def DH(dh_pair: DHKeyPair, dh_pub: X25519PublicKey) -> bytes:
-    return dh_pair.private_key.exchange(dh_pub)
+def DH(dh_pair: DHKeyPair, dh_pub: bytes) -> bytes:
+    return dh_pair.private_key.exchange(X25519PublicKey.from_public_bytes(dh_pub))
 
 
 def KDF_RK(rk, dh_out) -> (bytes, bytes):
@@ -122,27 +122,116 @@ def DECRYPT(mk, ciphertext, associated_data):
     return plaintext
 
 
-def HEADER(dh_pair: DHKeyPair, pn, n):
-    return json.dumps(
-        {
-            "public_key": base64.b64encode(dh_pair.public_key.public_bytes_raw()).decode(),
-            "pn": pn,
-            "n": n,
-        }
-    ).encode()
-
-def CONCAT(ad, header):
-    len_ad_len_header  = struct.pack('<QQ', len(ad), len(header))
-    return len_ad_len_header + ad + header
-
-@dataclass(frozen=True)
-class HeaderObj:
-    dh: X25519PublicKey
+@dataclass
+class DoubleRatchetHeader:
+    dh: bytes
     pn: int
     n: int
 
-def parse_header(header_bytes: bytes) -> HeaderObj:
-    data = json.loads(header_bytes.decode())
-    dh_bytes = base64.b64decode(data['public_key'])
-    dh = X25519PublicKey.from_public_bytes(dh_bytes)
-    return HeaderObj(dh=dh, pn=data['pn'], n=data['n'])
+
+def HEADER(dh_pair: DHKeyPair, pn, n):
+    return DoubleRatchetHeader(
+        dh=dh_pair.public_key.public_bytes_raw(),
+        pn=pn,
+        n=n,
+    )
+
+
+def double_ratchet_header_serialize(header: DoubleRatchetHeader) -> str:
+    return base64.b64encode(json.dumps({
+        "dh_b64": base64.b64encode(header.dh).decode(),
+        "pn": header.pn,
+        "n": header.n,
+    }).encode()).decode()
+
+
+def double_ratchet_header_deserialize(header_bytes: str) -> DoubleRatchetHeader:
+    header_dict = json.loads(base64.b64decode(header_bytes).decode())
+    return DoubleRatchetHeader(dh=base64.b64decode(header_dict['dh_b64']), pn=header_dict['pn'], n=header_dict['n'])
+
+
+def CONCAT(ad, header):
+    serialized_header = double_ratchet_header_serialize(header).encode()
+    len_ad_len_header = struct.pack('<QQ', len(ad), len(serialized_header))
+    return len_ad_len_header + ad + serialized_header
+
+
+class DoubleRatchetState:
+    def __init__(self):
+        self.DHs = None  # DHKeyPair
+        self.DHr = None  # X25519PublicKey
+        self.RK = None  # bytes
+        self.CKs = None  # bytes
+        self.CKr = None  # bytes
+        self.Ns = 0  # int
+        self.Nr = 0  # int
+        self.PN = 0  # int
+        self.MKSKIPPED = {}  # dict
+
+
+def double_ratchet_state_to_dict(state: DoubleRatchetState) -> dict[str, ...]:
+    """
+    Convert a RatchetState object to a JSON-serializable dict (base64 encoded).
+    Returns a dict that can be json.dumps() -> base64 encoded.
+    """
+    state_dict = {
+        "DHs": {
+            "private": base64.b64encode(state.DHs.private_key.private_bytes_raw()).decode(),
+            "public": base64.b64encode(state.DHs.public_key.public_bytes_raw()).decode(),
+        } if state.DHs else None,
+        "DHr_b64": base64.b64encode(state.DHr).decode() if state.DHr else None,
+        "RK": base64.b64encode(state.RK).decode() if state.RK else None,
+        "CKs": base64.b64encode(state.CKs).decode() if state.CKs else None,
+        "CKr": base64.b64encode(state.CKr).decode() if state.CKr else None,
+        "Ns": state.Ns,
+        "Nr": state.Nr,
+        "PN": state.PN,
+        "MKSKIPPED": {
+            f"{base64.b64encode(k[0].public_bytes_raw()).decode()}_{k[1]}": base64.b64encode(v).decode()
+            for k, v in state.MKSKIPPED.items()
+        }
+    }
+    return state_dict
+
+
+def deserialize_double_ratchet_state(state_dict: dict[str, ...]) -> DoubleRatchetState:
+    """
+    Reconstruct a RatchetState object from a JSON dict (with base64-encoded values).
+    """
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+
+    state = DoubleRatchetState()
+
+    # Reconstruct DHs (DHKeyPair)
+    if state_dict.get("DHs"):
+        priv_bytes = base64.b64decode(state_dict["DHs"]["private"])
+        pub_bytes = base64.b64decode(state_dict["DHs"]["public"])
+        priv_key = X25519PrivateKey.from_private_bytes(priv_bytes)
+        pub_key = X25519PublicKey.from_public_bytes(pub_bytes)
+        state.DHs = DHKeyPair(priv_key, pub_key)
+
+    if state_dict.get("DHr_b64"):
+        state.DHr = base64.b64decode(state_dict["DHr_b64"])
+
+    # Reconstruct byte strings
+    state.RK = base64.b64decode(state_dict["RK"]) if state_dict.get("RK") else None
+    state.CKs = base64.b64decode(state_dict["CKs"]) if state_dict.get("CKs") else None
+    state.CKr = base64.b64decode(state_dict["CKr"]) if state_dict.get("CKr") else None
+
+    # Reconstruct integers
+    state.Ns = state_dict.get("Ns", 0)
+    state.Nr = state_dict.get("Nr", 0)
+    state.PN = state_dict.get("PN", 0)
+
+    # Reconstruct MKSKIPPED (dict of tuples → bytes)
+    state.MKSKIPPED = {}
+    if state_dict.get("MKSKIPPED"):
+        for key_str, val_b64 in state_dict["MKSKIPPED"].items():
+            parts = key_str.rsplit("_", 1)
+            if len(parts) == 2:
+                pub_b64, n_str = parts
+                dh_pub_bytes = base64.b64decode(pub_b64)
+                n = int(n_str)
+                state.MKSKIPPED[(dh_pub_bytes, n)] = base64.b64decode(val_b64)
+
+    return state

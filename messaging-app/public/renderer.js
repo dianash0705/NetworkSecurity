@@ -57,6 +57,70 @@ window.EncryptionService = {
 
     getLocalApiPort: () => localApiPort,
 
+    initSenderDoubleRatchet: async (shared_serret_b64, peer_dh_public_key_b64) => {
+        if (!localApiPort) {
+            console.error("Encryption service not ready yet");
+            return false;
+        }
+
+        try {
+            const response = await fetch(`http://127.0.0.1:${localApiPort}/init-sender-double-ratchet`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    shared_secret_b64: shared_serret_b64,
+                    peer_dh_public_key_b64: peer_dh_public_key_b64,
+                })
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error(`[initSenderDoubleRatchet] Failed (Status ${response.status}):`, errorText);
+                return false;
+            }
+
+            const data = await response.json();
+
+            saveRatchetState(currentUsername, recipientId, data.state_b64);
+            return true;
+        } catch (error) {
+            console.error("[initSenderDoubleRatchet] Error:", error);
+            return false;
+        }
+    },
+
+    initReceiverDoubleRatchet: async (shared_serret_b64, self_dh_public_key_b64, self_dh_private_key_b64) => {
+        if (!localApiPort) {
+            console.error("Encryption service not ready yet");
+            return false;
+        }
+
+        try {
+            const response = await fetch(`http://127.0.0.1:${localApiPort}/init-receiver-double-ratchet`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    shared_secret_b64: shared_serret_b64,
+                    self_dh_public_key_b64: self_dh_public_key_b64,
+                    self_dh_private_key_b64: self_dh_private_key_b64,
+                })
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error(`[initReceiverDoubleRatchet] Failed (Status ${response.status}):`, errorText);
+                return false;
+            }
+
+            const data = await response.json();
+
+            saveRatchetState(currentUsername, recipientId, data.state_b64);
+        } catch (error) {
+            console.error("[initReceiverDoubleRatchet] Error:", error);
+            return false;
+        }
+    },
+    
     initRatchet: async (recipientId, sharedSecretB64, bobDhPublicKeyB64, role) => {
         /**
          * Initialize a new ratchet session for a conversation.
