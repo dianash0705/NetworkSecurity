@@ -48,6 +48,16 @@ function saveRatchetState(username, recipientId, state_b64) {
     conversationStates[recipientId] = state_b64;
 }
 
+async function fetchIdentityKeyB64(username) {
+    const resp = await fetch(`${API_BASE}/get-identity-key/${encodeURIComponent(username)}`);
+    if (resp.ok) {
+        const data = await resp.json();
+        return data.identity_key_public;
+    } else {
+        throw new Error(`Failed to fetch identity key for user ${username}, status: ${resp.status}`);
+    }
+}
+
 // 2. Expose "Encryption Service" to app.js via the window object
 window.EncryptionService = {
     setCurrentUsername: (username) => {
@@ -144,7 +154,13 @@ window.EncryptionService = {
         }
 
         const plaintextB64 = toBase64(text);
-        const adB64 = toBase64(JSON.stringify({ to: recipientId }));
+
+        const senderIdentityKeyB64 = localStorage.getItem(`teatime_identity_pub_${currentUsername}`);
+        const receiverIdentityKeyB64 = await fetchIdentityKeyB64(recipientId);
+        const adB64 = toBase64(JSON.stringify({
+          sender_identity_key_b64: senderIdentityKeyB64,
+          receiver_identity_key_b64: receiverIdentityKeyB64,
+        }));
 
         try {
             const response = await fetch(`http://127.0.0.1:${localApiPort}/encrypt-message`, {
@@ -214,7 +230,13 @@ window.EncryptionService = {
             return null;
         }
 
-        const adB64 = toBase64(JSON.stringify({ to: currentUsername }));
+        const receiverIdentityKeyB64 = localStorage.getItem(`teatime_identity_pub_${currentUsername}`);
+        const sender_identity_key_b64 = await fetchIdentityKeyB64(recipientId);
+
+        const adB64 = toBase64(JSON.stringify({
+          sender_identity_key_b64: sender_identity_key_b64,
+          receiver_identity_key_b64: receiverIdentityKeyB64,
+        }));
 
         try {
             const response = await fetch(`http://127.0.0.1:${localApiPort}/decrypt-message`, {
