@@ -86,7 +86,7 @@ async function login() {
             // Call the local sidecar service to generate X3DH identity key pair
             let keyPair;
             try {
-                const keyGenRes = await fetch(`http://127.0.0.1:${localApiPort}/3xdh-create-identity-key`, {
+                const keyGenRes = await fetch(`http://127.0.0.1:${localApiPort}/x3dh-create-identity-key`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' }
                 });
@@ -139,8 +139,7 @@ async function login() {
             const prekeyPrivB64 = prekeyData.prekey_private_b64;
             const prekeyPubB64 = prekeyData.prekey_public_b64;
             const prekeySigB64 = prekeyData.prekey_signature_b64;
-            localStorage.setItem(`teatime_signed_prekey_priv_${username}`, prekeyPrivB64);
-            localStorage.setItem(`teatime_signed_prekey_pub_${username}`, prekeyPubB64);
+            localStorage.setItem(`teatime_prekey_priv_${username}`, prekeyPrivB64);
 
             // --- Generate one-time keys via sidecar ---
             let onetimeKeysData = null;
@@ -478,12 +477,9 @@ async function handleReceiverX3DH(senderName, ephemeralKey) {
         const sharedSecret = x3dhReceiverResult.shared_secret_key_b64;
 
         // Initialize ratchet as receiver
-        const initRatchetSuccess = await window.EncryptionService.initReceiverRatchet(
-            senderName,
+        const initRatchetSuccess = await window.EncryptionService.initRatchet(
             sharedSecret,
             ourPrekeyPrivate,
-            ourPrekeyPublic,
-            "receiver"
         );
 
         if (initRatchetSuccess) {
@@ -753,12 +749,168 @@ async function selectContact(user) {
 }
 
 function updateChatHeader(user) {
+    const isVerified = localStorage.getItem(`teatime_verified_${currentUser}_${user}`) === 'true';
     chatWith.innerHTML = `
         <div class="chat-header-avatar">${getInitials(user)}</div>
         <div class="chat-header-info">
             <h3>${user}</h3>
         </div>
+        <button class="chat-header-security-btn${isVerified ? ' is-verified' : ''}" id="securityBtn" title="Security Verification">
+            🔒 ${isVerified ? 'Verified' : 'Encryption'}
+        </button>
     `;
+    // Attach click handler for security button
+    const secBtn = document.getElementById('securityBtn');
+    if (secBtn) {
+        secBtn.addEventListener('click', () => openSecurityVerification(user));
+    }
+}
+
+// ============================================================================
+// SECURITY VERIFICATION MODAL
+// ============================================================================
+
+/**
+ * Open the Security Verification modal for a given contact.
+ */
+async function openSecurityVerification(contact) {
+    // 1. Gather identity keys
+    const selfKeyB64 = localStorage.getItem(`teatime_identity_pub_${currentUser}`);
+    let peerKeyB64 = null;
+
+    try {
+        const resp = await fetch(`${API_BASE}/get-identity-key/${encodeURIComponent(contact)}`);
+        if (resp.ok) {
+            const data = await resp.json();
+            peerKeyB64 = data.identity_key_public;
+        }
+    } catch (e) {
+        console.error('Failed to fetch peer identity key:', e);
+    }
+
+    if (!selfKeyB64 || !peerKeyB64) {
+        alert('Could not retrieve identity keys for security verification.');
+        return;
+    }
+
+    // 2. Check current verification state
+    const verifiedKey = `teatime_verified_${currentUser}_${contact}`;
+    const isVerified = localStorage.getItem(verifiedKey) === 'true';
+
+    // 3. Build and show modal
+    const overlay = document.createElement('div');
+    overlay.className = 'security-overlay';
+    overlay.id = 'securityOverlay';
+
+    overlay.innerHTML = `
+        <div class="security-modal">
+            <div class="security-modal-header">
+                <div class="lock-icon">🔒</div>
+                <div class="header-text">
+                    <h2>Encryption</h2>
+                    <p>Chat with ${escapeHtml(contact)}</p>
+                </div>
+                <button class="security-modal-close" id="securityModalClose">✕</button>
+            </div>
+            <div class="security-modal-body">
+                <div class="security-info-text">
+                    <span class="e2e-badge">🔐 E2E</span>
+                    Messages and calls are secured with <strong>end-to-end encryption</strong>.
+                    Only you and <strong>${escapeHtml(contact)}</strong> can read or listen to them.
+                    Not even the server can access your messages.
+                </div>
+
+                <div class="identity-key-section" id="identityKeySection">
+                    <button class="key-toggle-btn" id="keyToggleBtn">🔑 Show Identity Keys</button>
+                    <div id="identityKeysContainer" style="display:none; flex-direction:column; gap:10px;">
+                        <div class="identity-key-card self">
+                            <div class="key-card-header">
+                                <div class="key-avatar">${getInitials(currentUser)}</div>
+                                <span class="key-label">${escapeHtml(currentUser)}</span>
+                                <span class="key-tag">You</span>
+                            </div>
+                            <div class="identity-key-raw">${escapeHtml(selfKeyB64)}</div>
+                        </div>
+                        <div class="identity-key-card peer">
+                            <div class="key-card-header">
+                                <div class="key-avatar">${getInitials(contact)}</div>
+                                <span class="key-label">${escapeHtml(contact)}</span>
+                                <span class="key-tag">Contact</span>
+                            </div>
+                            <div class="identity-key-raw">${escapeHtml(peerKeyB64)}</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="verify-section">
+                    <button class="verify-btn ${isVerified ? 'verified' : 'unverified'}" id="verifyIdentityBtn">
+                        ${isVerified ? '✅  Identity Verified' : '🛡️  Mark as Verified'}
+                    </button>
+                    <div class="verify-status-text" id="verifyStatusText">
+                        ${isVerified
+                            ? 'You have verified this contact\u2019s identity. You will be notified if their security key changes.'
+                            : 'Compare the safety numbers above with your contact to verify their identity.'}
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    // --- Event handlers ---
+    // Close
+    document.getElementById('securityModalClose').addEventListener('click', closeSecurityModal);
+    overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) closeSecurityModal();
+    });
+
+    // Toggle raw keys
+    document.getElementById('keyToggleBtn').addEventListener('click', () => {
+        const container = document.getElementById('identityKeysContainer');
+        const btn = document.getElementById('keyToggleBtn');
+        if (container.style.display === 'none') {
+            container.style.display = 'flex';
+            btn.textContent = '🔑 Hide Identity Keys';
+        } else {
+            container.style.display = 'none';
+            btn.textContent = '🔑 Show Identity Keys';
+        }
+    });
+
+    // Verify / Unverify button
+    document.getElementById('verifyIdentityBtn').addEventListener('click', () => {
+        const btn = document.getElementById('verifyIdentityBtn');
+        const statusText = document.getElementById('verifyStatusText');
+        const currentlyVerified = localStorage.getItem(verifiedKey) === 'true';
+
+        if (currentlyVerified) {
+            // Unverify
+            localStorage.removeItem(verifiedKey);
+            btn.className = 'verify-btn unverified';
+            btn.innerHTML = '🛡️  Mark as Verified';
+            statusText.textContent = 'Compare the safety numbers above with your contact to verify their identity.';
+        } else {
+            // Verify
+            localStorage.setItem(verifiedKey, 'true');
+            btn.className = 'verify-btn verified';
+            btn.innerHTML = '✅  Identity Verified';
+            statusText.textContent = 'You have verified this contact\u2019s identity. You will be notified if their security key changes.';
+        }
+
+        // Update header button state
+        updateChatHeader(contact);
+
+        // Re-attach close handler since header was re-rendered
+        // (The overlay is still in the DOM, not affected by the header re-render)
+    });
+}
+
+function closeSecurityModal() {
+    const overlay = document.getElementById('securityOverlay');
+    if (overlay) {
+        overlay.remove();
+    }
 }
 
 // Helper: Save sent message plaintext locally (since server only has encrypted)
@@ -844,12 +996,12 @@ async function sendMessage() {
             console.log(`[sendMessage] First message to ${selectedContact}, performing X3DH...`);
             
             // Fetch peer's key bundle
-            const keyBundleResp = await fetch(`${API_BASE}/get-key-bundle/${selectedContact}`);
-            if (!keyBundleResp.ok) {
+            const preKeyBundleResponse = await fetch(`${API_BASE}/get-prekey-bundle/${selectedContact}`);
+            if (!preKeyBundleResponse.ok) {
                 alert("Failed to get peer's key bundle");
                 return;
             }
-            const keyBundle = await keyBundleResp.json();
+            const preKeyBundle = await preKeyBundleResponse.json();
             
             // Get our identity keys from localStorage
             const ourIdentityPrivate = localStorage.getItem(`teatime_identity_sec_${currentUser}`);
@@ -873,11 +1025,10 @@ async function sendMessage() {
                 body: JSON.stringify({
                     self_identity_key_b64: ourIdentityPrivate,
                     self_identity_key_public_b64: ourIdentityPublic,
-                    peer_identity_key_public_b64: keyBundle.identity_key_public,
-                    peer_prekey_public_b64: keyBundle.prekey_public,
-                    peer_prekey_signature_b64: keyBundle.prekey_signature_public,
-                    peer_onetime_prekey_public_b64: keyBundle.onetime_key_public,
-                    peer_signing_key_public_b64: keyBundle.signing_key_public
+                    peer_identity_key_public_b64: preKeyBundle.identity_key_public,
+                    peer_prekey_public_b64: preKeyBundle.prekey_public,
+                    peer_prekey_signature_b64: preKeyBundle.prekey_signature_public,
+                    peer_onetime_prekey_public_b64: preKeyBundle.onetime_key_public,
                 })
             });
 
@@ -908,16 +1059,12 @@ async function sendMessage() {
             const sharedSecret = x3dhInitiatorResult.shared_secret_key_b64;
             const ephemeralPublic = x3dhInitiatorResult.self_ephemeral_key_public_b64;
             const associatedData = x3dhInitiatorResult.associated_data_b64;
-            
-            // Get peer's prekey private... wait, we need Bob's DH keypair for RatchetInitAlice
-            // Actually, for RatchetInitAlice, we need bob_dh_public_key (the peer's prekey public)
+
             const peerPrekeyPublic = keyBundle.prekey_public;
 
             const initRatchetSuccess = await window.EncryptionService.initSenderRatchet(
-                selectedContact,
                 sharedSecret,
                 peerPrekeyPublic,  // Receiver's DH public key for sender initialization
-                "sender"
             );
 
             if (!initRatchetSuccess) {
