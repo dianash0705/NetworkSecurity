@@ -200,6 +200,28 @@ def main():
     assert pt3 == msg3, "Bob failed to decrypt msg3"
     logger.info("✅ Bob decrypted msg3: %r", pt3)
 
+    # MSG 4
+    msg4 = b"hello guys, does tea_time works? (4)"
+    header4, ct4, alice_state_b64 = ratchet_encrypt(alice_state, msg4, ad)
+    alice_state = state_from_b64(alice_state_b64)
+
+    pt4, bob_state_b64 = ratchet_decrypt(bob_state, header4, ct4, ad)
+    bob_state = state_from_b64(bob_state_b64)
+
+    assert pt4 == msg4, "Bob failed to decrypt msg4"
+    logger.info("✅ Bob decrypted msg4: %r", pt4)
+
+    # MSG 5
+    msg5 = b"hello humans, does tea_time works? (5)"
+    header5, ct5, alice_state_b64 = ratchet_encrypt(alice_state, msg5, ad)
+    alice_state = state_from_b64(alice_state_b64)
+
+    pt5, bob_state_b64 = ratchet_decrypt(bob_state, header5, ct5, ad)
+    bob_state = state_from_b64(bob_state_b64)
+
+    assert pt5 == msg5, "Bob failed to decrypt msg4"
+    logger.info("✅ Bob decrypted msg4: %r", pt5)
+
     logger.info("🎉 ALL GOOD: X3DH + Double Ratchet message flow succeeded.")
 
 
