@@ -68,7 +68,7 @@ window.EncryptionService = {
     //     }
 
     // initSenderRatchet: async (recipientId, sharedSecretB64, peerDhPublicKeyB64, role) => {
-    initSenderRatchet: async (shared_serret_b64, peer_dh_public_key_b64) => {
+    initSenderRatchet: async (recipientId, shared_serret_b64, peer_dh_public_key_b64) => {
         if (!localApiPort) {
             console.error("Encryption service not ready yet");
             return false;
@@ -100,7 +100,7 @@ window.EncryptionService = {
         }
     },
 
-    initReceiverRatchet: async (shared_serret_b64, self_dh_public_key_b64, self_dh_private_key_b64) => {
+    initReceiverRatchet: async (recipientId, shared_serret_b64, self_dh_public_key_b64, self_dh_private_key_b64) => {
         if (!localApiPort) {
             console.error("Encryption service not ready yet");
             return false;
@@ -126,6 +126,7 @@ window.EncryptionService = {
             const data = await response.json();
 
             saveRatchetState(currentUsername, recipientId, data.state_b64);
+            return true;
         } catch (error) {
             console.error("[initReceiverDoubleRatchet] Error:", error);
             return false;

@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from signal_protocol import double_ratchet_impl, double_ratchet_api
+from signal_protocol.double_ratchet_impl import DHKeyPair
 from signal_protocol.x3dh import IdentityKeyPair
 from signal_protocol import x3dh
 
@@ -127,8 +128,8 @@ class InitSenderDoubleRatchetRequest(BaseModel):
 
 class InitReceiverDoubleRatchetRequest(BaseModel):
     shared_secret_b64: str
-    self_dh_public_key_b64: str
     self_dh_private_key_b64: str
+    self_dh_public_key_b64: str
 
 
 class InitRatchetResponse(BaseModel):
@@ -145,11 +146,11 @@ def init_sender_double_ratchet(request: InitSenderDoubleRatchetRequest) -> InitR
     # I demonstrated why the receiver-signed-prekey should become the initial ratchet_public key
 
     shared_secret = base64.b64decode(request.shared_secret_b64)
-    bob_dh_public_key_bytes = base64.b64decode(request.bob_dh_public_key_b64)
+    peer_dh_public_key = base64.b64decode(request.peer_dh_public_key_b64)
 
     state = double_ratchet_impl.DoubleRatchetState()
 
-    double_ratchet_api.RatchetInitAlice(state, shared_secret, bob_dh_public_key_bytes)
+    double_ratchet_api.RatchetInitAlice(state, shared_secret, peer_dh_public_key)
 
     state_b64 = base64.b64encode(json.dumps(double_ratchet_impl.double_ratchet_state_to_dict(state)).encode()).decode()
 
@@ -161,11 +162,17 @@ def init_sender_double_ratchet(request: InitSenderDoubleRatchetRequest) -> InitR
 @app.post("/init-receiver-double-ratchet")
 def init_receiver_double_ratchet(request: InitReceiverDoubleRatchetRequest) -> InitRatchetResponse:
     shared_secret = base64.b64decode(request.shared_secret_b64)
-    bob_dh_public_key_bytes = base64.b64decode(request.bob_dh_public_key_b64)
+    self_dh_private_key = base64.b64decode(request.self_dh_private_key_b64)
+    self_dh_public_key = base64.b64decode(request.self_dh_public_key_b64)
+
+    self_key_pair = DHKeyPair(
+        private_key=X25519PrivateKey.from_private_bytes(self_dh_private_key),
+        public_key=X25519PublicKey.from_public_bytes(self_dh_public_key),
+    )
 
     state = double_ratchet_impl.DoubleRatchetState()
 
-    double_ratchet_api.RatchetInitBob(state, shared_secret, bob_dh_public_key_bytes)
+    double_ratchet_api.RatchetInitBob(state, shared_secret, self_key_pair)
 
     state_b64 = base64.b64encode(json.dumps(double_ratchet_impl.double_ratchet_state_to_dict(state)).encode()).decode()
 
@@ -266,9 +273,9 @@ def x3dh_create_onetime_keys(request: X3DHCreateOnetimeKeysRequest) -> X3DHCreat
     for one_time_key_obj in onetime_keys_obj.one_time_keys:
         one_time_key_pair = OneTimeKeyPair(
             onetime_key_public_b64=base64.b64encode(
-                one_time_key_obj.one_time_prekey_private.private_bytes_raw()).decode(),
-            onetime_key_private_b64=base64.b64encode(
                 one_time_key_obj.one_time_prekey_public.public_bytes_raw()).decode(),
+            onetime_key_private_b64=base64.b64encode(
+                one_time_key_obj.one_time_prekey_private.private_bytes_raw()).decode(),
         )
 
         onetime_keys_list.append(one_time_key_pair)
@@ -307,8 +314,10 @@ class DoX3DHByInitiatorResponse(BaseModel):
 def do_x3dh_by_initiator(request: DoX3DHByInitiatorReqeust) -> DoX3DHByInitiatorResponse:
     try:
         self_identity_key = X25519PrivateKey.from_private_bytes(base64.b64decode(request.self_identity_key_b64))
-        self_identity_key_public = X25519PublicKey.from_public_bytes(base64.b64decode(request.self_identity_key_public_b64))
-        peer_identity_key_public = X25519PublicKey.from_public_bytes(base64.b64decode(request.peer_identity_key_public_b64))
+        self_identity_key_public = X25519PublicKey.from_public_bytes(
+            base64.b64decode(request.self_identity_key_public_b64))
+        peer_identity_key_public = X25519PublicKey.from_public_bytes(
+            base64.b64decode(request.peer_identity_key_public_b64))
         peer_prekey_public = X25519PublicKey.from_public_bytes(base64.b64decode(request.peer_prekey_public_b64))
         peer_prekey_signature: bytes = base64.b64decode(request.peer_prekey_signature_b64)
         peer_onetime_prekey_public = X25519PublicKey.from_public_bytes(

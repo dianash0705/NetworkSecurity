@@ -139,8 +139,9 @@ async function login() {
             const prekeyPrivB64 = prekeyData.prekey_private_b64;
             const prekeyPubB64 = prekeyData.prekey_public_b64;
             const prekeySigB64 = prekeyData.prekey_signature_b64;
-            localStorage.setItem(`teatime_prekey_priv_${username}`, prekeyPrivB64);
-
+            localStorage.setItem(`teatime_signed_prekey_priv_${username}`, prekeyPrivB64);
+            localStorage.setItem(`teatime_signed_prekey_pub_${username}`, prekeyPubB64);
+            
             // --- Generate one-time keys via sidecar ---
             let onetimeKeysData = null;
             try {
@@ -161,15 +162,20 @@ async function login() {
             }
 
             // Save private one-time keys locally and prepare public-only array for server
-            const onetimePrivs = [];
+            const otkPairs = [];
             const onetimePubs = [];
             for (const k of onetimeKeysData.onetime_keys) {
-                onetimePrivs.push(k.onetime_key_private_b64);
+                otkPairs.push({
+                    public_b64: k.onetime_key_public_b64,
+                    private_b64: k.onetime_key_private_b64,
+                });
+
                 onetimePubs.push(k.onetime_key_public_b64);
             }
-            localStorage.setItem(`teatime_onetime_privs_${username}`, JSON.stringify(onetimePrivs));
-            // Also store public one-time keys locally so receiver can match consumed keys if needed
-            localStorage.setItem(`teatime_onetime_pubs_${username}`, JSON.stringify(onetimePubs));
+            localStorage.setItem(
+                `teatime_onetime_keypairs_${username}`,
+                JSON.stringify(otkPairs)
+            );
 
             // Register with the server (send only public key material)
             const response = await fetch(`${API_BASE}/register`, {
@@ -265,10 +271,10 @@ function connectWebSocket() {
                             notificationText = cached;
                         } else {
                             if (data.x3dh_ephemeral_public_b64) {
-                                await handleReceiverX3DH(data.sender, data.x3dh_ephemeral_public_b64);
+                                await handleReceiverX3DH(data.sender, data.x3dh_ephemeral_public_b64, data.one_time_key_public_b64);
                             }
                             const decrypted = await window.EncryptionService.decrypt(
-                                data.header_b64 || "",
+                                data.header_b64,
                                 data.encrypted_content,
                                 data.sender
                             );
@@ -400,8 +406,56 @@ function getDecryptedMessage(messageId) {
     return null;
 }
 
+function consumeOnetimePrivateForPublic(currentUser, publicB64) {
+  const key = `teatime_onetime_keypairs_${currentUser}`;
+  const raw = localStorage.getItem(key);
+
+  if (!raw) {
+    throw new Error(
+      `[OTK] No one-time key store found for ${currentUser}`
+    );
+  }
+
+  let pairs;
+  try {
+    pairs = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(
+      `[OTK] Corrupted one-time key store for ${currentUser}: ${e.message}`
+    );
+  }
+
+  if (!Array.isArray(pairs)) {
+    throw new Error(`[OTK] Invalid keypair format (expected array)`);
+  }
+
+  const idx = pairs.findIndex(
+    p => p.public_b64 === publicB64
+  );
+
+  if (idx === -1) {
+    throw new Error(
+      `[OTK] No matching private key for public=${publicB64}...`
+    );
+  }
+
+  const priv = pairs[idx].private_b64;
+
+  if (!priv) {
+    throw new Error(`[OTK] Matched entry but private key missing`);
+  }
+
+  // consume it
+  pairs.splice(idx, 1);
+  localStorage.setItem(key, JSON.stringify(pairs));
+
+  console.log(`[OTK] Consumed one-time key for ${currentUser}`);
+  return priv;
+}
+
+
 // Helper: Handle X3DH Receiver Flow
-async function handleReceiverX3DH(senderName, ephemeralKey) {
+async function handleReceiverX3DH(senderName, ephemeralKey, oneTimeKeyPublicB64) {
     try {
         // Ensure username is set in encryption service
         if (window.EncryptionService) {
@@ -421,33 +475,24 @@ async function handleReceiverX3DH(senderName, ephemeralKey) {
         const ourPrekeyPrivate = localStorage.getItem(`teatime_signed_prekey_priv_${currentUser}`);
         const ourPrekeyPublic = localStorage.getItem(`teatime_signed_prekey_pub_${currentUser}`);
 
-        // Consume one one-time private key (FIFO)
-        let ourOnetimePrivate = "";
-        const otkJson = localStorage.getItem(`teatime_onetime_privs_${currentUser}`);
-        if (otkJson) {
-            try {
-                const otkArr = JSON.parse(otkJson);
-                if (Array.isArray(otkArr) && otkArr.length > 0) {
-                    ourOnetimePrivate = otkArr.shift();
-                    localStorage.setItem(`teatime_onetime_privs_${currentUser}`, JSON.stringify(otkArr));
-                }
-            } catch (e) {
-                console.error('Failed to parse one-time privs:', e);
-            }
-        }
+        const remote_identity_key_public = await fetchIdentityKeyB64(senderName);
 
-        if (!ourIdentityPrivate || !ourPrekeyPrivate) {
-            console.error("Missing our keys for X3DH receiver");
+        let ourOnetimePrivate = consumeOnetimePrivateForPublic(currentUser, oneTimeKeyPublicB64);
+
+        if (!ourIdentityPrivate) {
+            console.error("Missing our identity private key for X3DH receiver");
             return false;
         }
 
-        // Get sender's identity key from key bundle
-        const senderKeyBundleResp = await fetch(`${API_BASE}/get-key-bundle/${senderName}`);
-        if (!senderKeyBundleResp.ok) {
-            console.error(`Failed to get ${senderName}'s key bundle`);
+        if(!ourPrekeyPrivate) {
+            console.error("Missing our ourPrekeyPrivate for X3DH receiver");
             return false;
         }
-        const senderKeyBundle = await senderKeyBundleResp.json();
+
+        if(!ourPrekeyPublic) {
+            console.error("Missing our ourPrekeyPublic for X3DH receiver");
+            return false;
+        }
 
         // Call X3DH receiver via sidecar
         const localApiPort = window.EncryptionService.getLocalApiPort();
@@ -456,14 +501,22 @@ async function handleReceiverX3DH(senderName, ephemeralKey) {
             return false;
         }
 
+        console.log("[X3DH Receiver] Calling sidecar with:", {
+                self_identity_key_private_b64: ourIdentityPrivate,
+                self_prekey_private_b64: ourPrekeyPrivate,
+                self_onetime_key_private_b64: ourOnetimePrivate,
+                peer_identity_key_public_b64: remote_identity_key_public,
+                peer_ephemeral_key_public_b64: ephemeralKey
+        });
+
         const x3dhReceiverResp = await fetch(`http://127.0.0.1:${localApiPort}/do-x3dh-by-receiver`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 self_identity_key_private_b64: ourIdentityPrivate,
                 self_prekey_private_b64: ourPrekeyPrivate,
-                self_onetime_key_private_b64: ourOnetimePrivate || "",
-                peer_identity_key_public_b64: senderKeyBundle.identity_key_public,
+                self_onetime_key_private_b64: ourOnetimePrivate,
+                peer_identity_key_public_b64: remote_identity_key_public,
                 peer_ephemeral_key_public_b64: ephemeralKey
             })
         });
@@ -477,9 +530,11 @@ async function handleReceiverX3DH(senderName, ephemeralKey) {
         const sharedSecret = x3dhReceiverResult.shared_secret_key_b64;
 
         // Initialize ratchet as receiver
-        const initRatchetSuccess = await window.EncryptionService.initRatchet(
+        const initRatchetSuccess = await window.EncryptionService.initReceiverRatchet(
+            senderName,
             sharedSecret,
-            ourPrekeyPrivate,
+            ourPrekeyPublic,
+            ourPrekeyPrivate
         );
 
         if (initRatchetSuccess) {
@@ -769,6 +824,16 @@ function updateChatHeader(user) {
 // ============================================================================
 // SECURITY VERIFICATION MODAL
 // ============================================================================
+
+async function fetchIdentityKeyB64(username) {
+    const resp = await fetch(`${API_BASE}/get-identity-key/${encodeURIComponent(username)}`);
+    if (resp.ok) {
+        const data = await resp.json();
+        return data.identity_key_public;
+    } else {
+        throw new Error(`Failed to fetch identity key for user ${username}, status: ${resp.status}`);
+    }
+}
 
 /**
  * Open the Security Verification modal for a given contact.
@@ -1060,11 +1125,10 @@ async function sendMessage() {
             const ephemeralPublic = x3dhInitiatorResult.self_ephemeral_key_public_b64;
             const associatedData = x3dhInitiatorResult.associated_data_b64;
 
-            const peerPrekeyPublic = keyBundle.prekey_public;
-
             const initRatchetSuccess = await window.EncryptionService.initSenderRatchet(
+                selectedContact,
                 sharedSecret,
-                peerPrekeyPublic,  // Receiver's DH public key for sender initialization
+                preKeyBundle.prekey_public,  // Receiver's DH public key for sender initialization
             );
 
             if (!initRatchetSuccess) {
@@ -1092,8 +1156,10 @@ async function sendMessage() {
                 encrypted_content: encryptionResult.encrypted_content,
                 header_b64: encryptionResult.header,
                 x3dh_ephemeral_public_b64: ephemeralPublic,
-                x3dh_associated_data_b64: associatedData
+                x3dh_associated_data_b64: associatedData,
+                one_time_key_public_b64: preKeyBundle.onetime_key_public
             };
+            console.log("[sendMessage] Sending message with X3DH data:", messageData);
 
             const response = await fetch(`${API_BASE}/send-message`, {
                 method: 'POST',
@@ -1114,8 +1180,7 @@ async function sendMessage() {
                 addUserToList(selectedContact);
                 await loadConversationFromBackend(selectedContact);
             } else {
-                const error = await response.json();
-                alert('Failed to send: ' + error.detail);
+                alert('Failed to send: ' + response.status + ' - ' + response.statusText);
             }
 
         } else {
@@ -1229,15 +1294,15 @@ async function checkForNewMessagesFromOthers() {
                 
                 // Check if this is a first message (has X3DH ephemeral key)
                 if (msg.x3dh_ephemeral_public_b64) {
-                    const success = await handleReceiverX3DH(senderName, msg.x3dh_ephemeral_public_b64);
+                    const success = await handleReceiverX3DH(senderName, msg.x3dh_ephemeral_public_b64, msg.one_time_key_public_b64);
                     if (!success) continue;
                 }
 
                 // Decrypt the message (works for both first and subsequent messages after ratchet init)
                 const decrypted = await window.EncryptionService.decrypt(
-                    msg.header_b64 || "",  // header from the message
+                    msg.header_b64,
                     msg.encrypted_content,
-                    senderName
+                    senderName,
                 );
 
                 if (decrypted) {
@@ -1306,12 +1371,10 @@ async function appendMessage(msg, scroll = true) {
         try {
             // Check if this message carries X3DH initialization data
             if (msg.x3dh_ephemeral_public_b64) {
-                await handleReceiverX3DH(msg.sender, msg.x3dh_ephemeral_public_b64);
+                await handleReceiverX3DH(msg.sender, msg.x3dh_ephemeral_public_b64, msg.one_time_key_public_b64);
             }
 
-            // header_b64 may be missing for older messages
-            const header = msg.header_b64 || "";
-            const decrypted = await window.EncryptionService.decrypt(header, msg.encrypted_content, msg.sender);
+            const decrypted = await window.EncryptionService.decrypt(msg.header_b64, msg.encrypted_content, msg.sender);
             if (decrypted) {
                 // sometimes the service returns a base64-encoded plaintext string; try to decode it if so
                 let decoded = decrypted;

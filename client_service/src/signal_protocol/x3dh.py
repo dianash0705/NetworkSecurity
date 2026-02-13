@@ -59,7 +59,10 @@ def create_new_prekey(identity_key: IdentityKeyPair) -> PreKeyPair:
     prekey_private = CURVE.generate()
     prekey_public = prekey_private.public_key()
 
-    modified_private_key = xeddsa.bindings.priv_force_sign(identity_key.identity_key_private.private_bytes_raw(), XEDDSA_BIT_SET)
+    modified_private_key = xeddsa.bindings.priv_force_sign(
+        identity_key.identity_key_private.private_bytes_raw(),
+        XEDDSA_BIT_SET
+    )
 
     prekey_signature = xeddsa.bindings.ed25519_priv_sign(
         priv=modified_private_key,
