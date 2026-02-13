@@ -547,6 +547,15 @@ def get_key(username: str, db: Session = Depends(get_db)):
     return {"username": username, "public_key": user.public_key}
 
 
+@app.get("/get-identity-key/{username}", tags=["User Actions"])
+def get_identity_key(username: str, db: Session = Depends(get_db)):
+    """Get the public identity key for a specific user (used for security verification)."""
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"username": username, "identity_key_public": user.identity_key_public}
+
+
 @app.post("/send-message", tags=["User Actions"])
 async def send_message(msg: MessageSend, db: Session = Depends(get_db)):
     """Receives an already encrypted blob and stores it for the receiver."""
